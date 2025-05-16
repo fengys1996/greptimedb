@@ -164,6 +164,16 @@ pub struct GrpcServerConfig {
     pub tls: TlsOption,
 }
 
+impl From<&GrpcOptions> for GrpcServerConfig {
+    fn from(opts: &GrpcOptions) -> Self {
+        Self {
+            max_recv_message_size: opts.max_recv_message_size.as_bytes() as usize,
+            max_send_message_size: opts.max_send_message_size.as_bytes() as usize,
+            tls: opts.tls.clone(),
+        }
+    }
+}
+
 impl Default for GrpcServerConfig {
     fn default() -> Self {
         Self {

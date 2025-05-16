@@ -349,8 +349,8 @@ impl StartCommand {
 
         let mut flownode = flownode_builder.build().await.context(StartFlownodeSnafu)?;
         let services = FlownodeServiceBuilder::new(&opts)
-            .with_grpc_server(flownode.flownode_server().clone())
-            .enable_http_service()
+            .with_flownode_grpc_server(flownode.flownode_server().clone())
+            .enable_expose_metrics()
             .build()
             .context(StartFlownodeSnafu)?;
         flownode.setup_services(services);

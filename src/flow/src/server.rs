@@ -29,7 +29,7 @@ use common_meta::key::TableMetadataManagerRef;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::node_manager::{Flownode, NodeManagerRef};
 use common_query::Output;
-use common_runtime::JoinHandle;
+use common_runtime::{global_runtime, JoinHandle};
 use common_telemetry::tracing::info;
 use futures::{FutureExt, TryStreamExt};
 use greptime_proto::v1::flow::{flow_server, FlowRequest, FlowResponse, InsertRequests};
@@ -39,15 +39,16 @@ use operator::insert::Inserter;
 use operator::statement::StatementExecutor;
 use partition::manager::PartitionRuleManager;
 use query::{QueryEngine, QueryEngineFactory};
+use servers::add_service;
 use servers::error::{StartGrpcSnafu, TcpBindSnafu, TcpIncomingSnafu};
+use servers::grpc::builder::GrpcServerBuilder;
 use servers::http::HttpServerBuilder;
 use servers::metrics_handler::MetricsHandler;
-use servers::server::{ServerHandler, ServerHandlers};
+use servers::server::ServerHandlers;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, oneshot, Mutex};
-use tonic::codec::CompressionEncoding;
 use tonic::transport::server::TcpIncoming;
 use tonic::{Request, Response, Status};
 
@@ -211,10 +212,6 @@ impl FlownodeServer {
 impl FlownodeServer {
     pub fn create_flow_service(&self) -> flow_server::FlowServer<impl flow_server::Flow> {
         flow_server::FlowServer::new(self.inner.flow_service.clone())
-            .accept_compressed(CompressionEncoding::Gzip)
-            .send_compressed(CompressionEncoding::Gzip)
-            .accept_compressed(CompressionEncoding::Zstd)
-            .send_compressed(CompressionEncoding::Zstd)
     }
 }
 
@@ -454,55 +451,65 @@ impl FlownodeBuilder {
     }
 }
 
-/// Useful in distributed mode
 pub struct FlownodeServiceBuilder<'a> {
     opts: &'a FlownodeOptions,
-    grpc_server: Option<FlownodeServer>,
-    enable_http_service: bool,
+    grpc_server_builder: GrpcServerBuilder,
+    expose_metrics: bool,
 }
 
 impl<'a> FlownodeServiceBuilder<'a> {
+    /// Create a [`FlownodeServiceBuilder`].
     pub fn new(opts: &'a FlownodeOptions) -> Self {
+        let grpc_opts = (&opts.grpc).into();
+        let grpc_server_builder = GrpcServerBuilder::new(grpc_opts, global_runtime());
         Self {
             opts,
-            grpc_server: None,
-            enable_http_service: false,
+            grpc_server_builder,
+            expose_metrics: false,
         }
     }
 
-    pub fn enable_http_service(self) -> Self {
+    /// Enable expose metrics http service.
+    pub fn enable_expose_metrics(self) -> Self {
         Self {
-            enable_http_service: true,
+            expose_metrics: true,
             ..self
         }
     }
 
-    pub fn with_grpc_server(self, grpc_server: FlownodeServer) -> Self {
-        Self {
-            grpc_server: Some(grpc_server),
-            ..self
-        }
+    /// Add a flownode service to gRPC service.
+    pub fn with_flownode_grpc_server(mut self, flownode_server: FlownodeServer) -> Self {
+        let grpc_server = flownode_server.create_flow_service();
+        let grpc_server_builder = &mut self.grpc_server_builder;
+        add_service!(grpc_server_builder, grpc_server);
+        self
     }
 
-    pub fn build(mut self) -> Result<ServerHandlers, Error> {
+    /// Expose mut gRPC server builder, which is convenient for adding more gRPC
+    /// service.
+    pub fn mut_grpc_server_buidler(&mut self) -> &mut GrpcServerBuilder {
+        &mut self.grpc_server_builder
+    }
+
+    pub fn build(self) -> Result<ServerHandlers, Error> {
         let handlers = ServerHandlers::default();
-        if let Some(grpc_server) = self.grpc_server.take() {
-            let addr: SocketAddr = self.opts.grpc.bind_addr.parse().context(ParseAddrSnafu {
-                addr: &self.opts.grpc.bind_addr,
-            })?;
-            let handler: ServerHandler = (Box::new(grpc_server), addr);
-            handlers.insert(handler);
-        }
+        let bind_addr = &self.opts.grpc.bind_addr;
+        let bind_addr = bind_addr
+            .parse()
+            .context(ParseAddrSnafu { addr: bind_addr })?;
+        let grpc_server = Box::new(self.grpc_server_builder.build());
+        handlers.insert((grpc_server, bind_addr));
 
-        if self.enable_http_service {
+        if self.expose_metrics {
             let http_server = HttpServerBuilder::new(self.opts.http.clone())
                 .with_metrics_handler(MetricsHandler)
                 .build();
-            let addr: SocketAddr = self.opts.http.addr.parse().context(ParseAddrSnafu {
-                addr: &self.opts.http.addr,
-            })?;
-            let handler: ServerHandler = (Box::new(http_server), addr);
-            handlers.insert(handler);
+            let http_server = Box::new(http_server);
+            let http_addr = &self.opts.http.addr;
+            let addr: SocketAddr = http_addr
+                .parse()
+                .context(ParseAddrSnafu { addr: http_addr })?;
+            handlers.insert((http_server, addr));
         }
         Ok(handlers)
     }
