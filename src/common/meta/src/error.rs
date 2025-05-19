@@ -140,6 +140,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Unimplemented operation {}", operation))]
+    Unimplemented {
+        operation: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to wait procedure done"))]
     WaitProcedure {
         #[snafu(implicit)]
@@ -798,6 +805,13 @@ pub enum Error {
         #[snafu(source)]
         error: common_time::error::Error,
     },
+
+    #[snafu(display("Unsupported severity: {}", severity))]
+    UnsupportedSeverity {
+        severity: i32,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -819,7 +833,7 @@ impl ErrorExt for Error {
             NoLeader { .. } => StatusCode::TableUnavailable,
             ValueNotExist { .. } | ProcedurePoisonConflict { .. } => StatusCode::Unexpected,
 
-            Unsupported { .. } => StatusCode::Unsupported,
+            Unimplemented { .. } | Unsupported { .. } => StatusCode::Unsupported,
 
             SerdeJson { .. }
             | ParseOption { .. }
@@ -870,7 +884,9 @@ impl ErrorExt for Error {
             | InvalidUnsetDatabaseOption { .. }
             | InvalidTopicNamePrefix { .. }
             | InvalidTimeZone { .. } => StatusCode::InvalidArguments,
-            InvalidFlowRequestBody { .. } => StatusCode::InvalidArguments,
+            UnsupportedSeverity { .. } | InvalidFlowRequestBody { .. } => {
+                StatusCode::InvalidArguments
+            }
 
             FlowNotFound { .. } => StatusCode::FlowNotFound,
             FlowRouteNotFound { .. } => StatusCode::Unexpected,

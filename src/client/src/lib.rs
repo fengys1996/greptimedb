@@ -51,6 +51,8 @@ pub fn from_grpc_response(response: GreptimeResponse) -> Result<u32> {
         })?;
         match res {
             Response::AffectedRows(AffectedRows { value }) => Ok(value),
+            // TODO(fys): implement
+            Response::ArrowResp(_arrow) => unimplemented!(),
         }
     } else {
         let status_code =

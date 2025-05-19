@@ -13,6 +13,7 @@
 // limitations under the License.
 
 pub mod ddl;
+pub mod ddl_trigger;
 pub mod lock;
 pub mod procedure;
 pub mod router;

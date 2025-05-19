@@ -227,6 +227,7 @@ impl GreptimeDbStandaloneBuilder {
                 },
                 procedure_manager.clone(),
                 register_procedure_loaders,
+                None,
             )
             .unwrap(),
         );

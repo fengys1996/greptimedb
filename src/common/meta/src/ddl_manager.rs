@@ -49,14 +49,15 @@ use crate::key::table_name::TableNameKey;
 use crate::key::{DeserializedValueWithBytes, TableMetadataManagerRef};
 use crate::rpc::ddl::DdlTask::{
     AlterDatabase, AlterLogicalTables, AlterTable, CreateDatabase, CreateFlow, CreateLogicalTables,
-    CreateTable, CreateView, DropDatabase, DropFlow, DropLogicalTables, DropTable, DropView,
-    TruncateTable,
+    CreateTable, CreateTrigger, CreateView, DropDatabase, DropFlow, DropLogicalTables, DropTable,
+    DropView, TruncateTable,
 };
 use crate::rpc::ddl::{
     AlterDatabaseTask, AlterTableTask, CreateDatabaseTask, CreateFlowTask, CreateTableTask,
     CreateViewTask, DropDatabaseTask, DropFlowTask, DropTableTask, DropViewTask, QueryContext,
     SubmitDdlTaskRequest, SubmitDdlTaskResponse, TruncateTableTask,
 };
+use crate::rpc::ddl_trigger::CreateTriggerTask;
 use crate::rpc::procedure;
 use crate::rpc::procedure::{MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse};
 use crate::rpc::router::RegionRoute;
@@ -70,7 +71,21 @@ pub type BoxedProcedureLoaderFactory = dyn Fn(DdlContext) -> BoxedProcedureLoade
 pub struct DdlManager {
     ddl_context: DdlContext,
     procedure_manager: ProcedureManagerRef,
+    trigger_manager: Option<TriggerDdlManagerRef>,
 }
+
+/// This trait is responsible for handling DDL tasks about triggers. e.g.,
+/// create trigger, drop trigger, etc.
+#[async_trait::async_trait]
+pub trait TriggerDdlManager: Send + Sync {
+    async fn create_trigger(
+        &self,
+        create_trigger_task: CreateTriggerTask,
+        query_context: QueryContext,
+    ) -> Result<SubmitDdlTaskResponse>;
+}
+
+pub type TriggerDdlManagerRef = Arc<dyn TriggerDdlManager>;
 
 macro_rules! procedure_loader_entry {
     ($procedure:ident) => {
@@ -100,10 +115,12 @@ impl DdlManager {
         ddl_context: DdlContext,
         procedure_manager: ProcedureManagerRef,
         register_loaders: bool,
+        trigger_manager: Option<TriggerDdlManagerRef>,
     ) -> Result<Self> {
         let manager = Self {
             ddl_context,
             procedure_manager,
+            trigger_manager,
         };
         if register_loaders {
             manager.register_loaders()?;
@@ -633,6 +650,21 @@ async fn handle_drop_view_task(
     })
 }
 
+async fn handle_create_trigger_task(
+    ddl_manager: &DdlManager,
+    create_trigger_task: CreateTriggerTask,
+    query_context: QueryContext,
+) -> Result<SubmitDdlTaskResponse> {
+    let Some(m) = ddl_manager.trigger_manager.as_ref() else {
+        return UnsupportedSnafu {
+            operation: "create trigger",
+        }
+        .fail();
+    };
+
+    m.create_trigger(create_trigger_task, query_context).await
+}
+
 async fn handle_create_flow_task(
     ddl_manager: &DdlManager,
     create_flow_task: CreateFlowTask,
@@ -782,6 +814,14 @@ impl ProcedureExecutor for DdlManager {
                     handle_create_view_task(self, create_view_task).await
                 }
                 DropView(drop_view_task) => handle_drop_view_task(self, drop_view_task).await,
+                CreateTrigger(create_trigger_task) => {
+                    handle_create_trigger_task(
+                        self,
+                        create_trigger_task,
+                        request.query_context.into(),
+                    )
+                    .await
+                }
             }
         }
         .trace(span)
@@ -905,6 +945,7 @@ mod tests {
             },
             procedure_manager.clone(),
             true,
+            None,
         );
 
         let expected_loaders = vec![

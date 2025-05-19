@@ -45,6 +45,7 @@ use table::metadata::{RawTableInfo, TableId};
 use table::table_name::TableName;
 use table::table_reference::TableReference;
 
+use super::ddl_trigger::CreateTriggerTask;
 use crate::error::{
     self, InvalidSetDatabaseOptionSnafu, InvalidTimeZoneSnafu, InvalidUnsetDatabaseOptionSnafu,
     Result,
@@ -68,6 +69,7 @@ pub enum DdlTask {
     DropFlow(DropFlowTask),
     CreateView(CreateViewTask),
     DropView(DropViewTask),
+    CreateTrigger(CreateTriggerTask),
 }
 
 impl DdlTask {
@@ -242,6 +244,9 @@ impl TryFrom<Task> for DdlTask {
             Task::DropFlowTask(drop_flow) => Ok(DdlTask::DropFlow(drop_flow.try_into()?)),
             Task::CreateViewTask(create_view) => Ok(DdlTask::CreateView(create_view.try_into()?)),
             Task::DropViewTask(drop_view) => Ok(DdlTask::DropView(drop_view.try_into()?)),
+            Task::CreateTriggerTask(create_trigger) => {
+                Ok(DdlTask::CreateTrigger(create_trigger.try_into()?))
+            }
         }
     }
 }
@@ -292,6 +297,7 @@ impl TryFrom<SubmitDdlTaskRequest> for PbDdlTaskRequest {
             DdlTask::DropFlow(task) => Task::DropFlowTask(task.into()),
             DdlTask::CreateView(task) => Task::CreateViewTask(task.try_into()?),
             DdlTask::DropView(task) => Task::DropViewTask(task.into()),
+            DdlTask::CreateTrigger(task) => Task::CreateTriggerTask(task.into()),
         };
 
         Ok(Self {

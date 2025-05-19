@@ -34,7 +34,7 @@ use common_meta::datanode::RegionStat;
 use common_meta::ddl::flow_meta::{FlowMetadataAllocator, FlowMetadataAllocatorRef};
 use common_meta::ddl::table_meta::{TableMetadataAllocator, TableMetadataAllocatorRef};
 use common_meta::ddl::{DdlContext, NoopRegionFailureDetectorControl, ProcedureExecutorRef};
-use common_meta::ddl_manager::DdlManager;
+use common_meta::ddl_manager::{DdlManager, TriggerDdlManagerRef};
 use common_meta::key::flow::flow_state::FlowStat;
 use common_meta::key::flow::{FlowMetadataManager, FlowMetadataManagerRef};
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
@@ -576,6 +576,7 @@ impl StartCommand {
             flow_id_sequence,
         ));
 
+        let trigger_ddl_manager: Option<TriggerDdlManagerRef> = plugins.get();
         let ddl_task_executor = Self::create_ddl_task_executor(
             procedure_manager.clone(),
             node_manager.clone(),
@@ -584,6 +585,7 @@ impl StartCommand {
             table_meta_allocator,
             flow_metadata_manager,
             flow_meta_allocator,
+            trigger_ddl_manager,
         )
         .await?;
 
@@ -657,6 +659,7 @@ impl StartCommand {
         table_metadata_allocator: TableMetadataAllocatorRef,
         flow_metadata_manager: FlowMetadataManagerRef,
         flow_metadata_allocator: FlowMetadataAllocatorRef,
+        trigger_ddl_manager: Option<TriggerDdlManagerRef>,
     ) -> Result<ProcedureExecutorRef> {
         let procedure_executor: ProcedureExecutorRef = Arc::new(
             DdlManager::try_new(
@@ -673,6 +676,7 @@ impl StartCommand {
                 },
                 procedure_manager,
                 true,
+                trigger_ddl_manager,
             )
             .context(error::InitDdlManagerSnafu)?,
         );
