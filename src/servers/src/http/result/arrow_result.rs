@@ -38,7 +38,8 @@ pub struct ArrowResponse {
     pub(crate) execution_time_ms: u64,
 }
 
-async fn write_arrow_bytes(
+// TODO: move to reasonable place, since the both http and gRPC modules use it.
+pub async fn write_arrow_bytes(
     mut recordbatches: Pin<Box<dyn RecordBatchStream + Send>>,
     schema: &Arc<Schema>,
     compression: Option<CompressionType>,

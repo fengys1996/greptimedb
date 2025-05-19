@@ -651,6 +651,7 @@ impl StartCommand {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_ddl_task_executor(
         procedure_manager: ProcedureManagerRef,
         node_manager: NodeManagerRef,

@@ -13,6 +13,8 @@ workspace = true
 [dependencies]
 api.workspace = true
 arc-swap = "1.6"
+arrow.workspace = true
+arrow-array.workspace = true
 arrow-flight.workspace = true
 async-stream.workspace = true
 async-trait.workspace = true

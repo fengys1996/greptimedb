@@ -1876,6 +1876,8 @@ version = "0.15.0"
 dependencies = [
  "api",
  "arc-swap",
+ "arrow 54.2.1",
+ "arrow-array 54.2.1",
  "arrow-flight",
  "async-stream",
  "async-trait",

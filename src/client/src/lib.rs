@@ -23,9 +23,13 @@ pub mod load_balance;
 mod metrics;
 pub mod region;
 
+use std::io::Cursor;
+
 pub use api;
 use api::v1::greptime_response::Response;
 use api::v1::{AffectedRows, GreptimeResponse};
+use arrow::ipc::reader::FileReader;
+use arrow_array::RecordBatch;
 pub use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::status_code::StatusCode;
 pub use common_query::{Output, OutputData, OutputMeta};
@@ -51,8 +55,49 @@ pub fn from_grpc_response(response: GreptimeResponse) -> Result<u32> {
         })?;
         match res {
             Response::AffectedRows(AffectedRows { value }) => Ok(value),
-            // TODO(fys): implement
             Response::ArrowResp(_arrow) => unimplemented!(),
+        }
+    } else {
+        let status_code =
+            StatusCode::from_u32(status.status_code).context(IllegalDatabaseResponseSnafu {
+                err_msg: format!("invalid status: {:?}", status),
+            })?;
+        ServerSnafu {
+            code: status_code,
+            msg: status.err_msg,
+        }
+        .fail()
+    }
+}
+
+pub enum GreptimeResp {
+    AffectedRows(u32),
+    Arrow(Vec<RecordBatch>),
+}
+
+pub fn from_grpc_response_v2(response: GreptimeResponse) -> Result<GreptimeResp> {
+    let header = response.header.context(IllegalDatabaseResponseSnafu {
+        err_msg: "missing header",
+    })?;
+    let status = header.status.context(IllegalDatabaseResponseSnafu {
+        err_msg: "missing status",
+    })?;
+
+    if StatusCode::is_success(status.status_code) {
+        let res = response.response.context(IllegalDatabaseResponseSnafu {
+            err_msg: "missing response",
+        })?;
+        match res {
+            Response::AffectedRows(AffectedRows { value }) => Ok(GreptimeResp::AffectedRows(value)),
+            Response::ArrowResp(arrow) => {
+                let reader = FileReader::try_new(Cursor::new(arrow.data), None).unwrap();
+                let mut rbs = vec![];
+                for rb in reader {
+                    let rb = rb.unwrap();
+                    rbs.push(rb);
+                }
+                Ok(GreptimeResp::Arrow(rbs))
+            }
         }
     } else {
         let status_code =
