@@ -22,6 +22,7 @@ pub mod prom_query_gateway;
 pub mod region_server;
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use api::v1::health_check_server::{HealthCheck, HealthCheckServer};
 use api::v1::{HealthCheckRequest, HealthCheckResponse};
@@ -139,7 +140,7 @@ pub struct GrpcServer {
     /// Used to wait for the server to stop, performing the old blocking fashion.
     serve_state: Mutex<Option<Receiver<Result<()>>>>,
     // handlers
-    routes: Mutex<Option<Routes>>,
+    routes: Arc<Mutex<Option<Routes>>>,
     // tls config
     tls_config: Option<ServerTlsConfig>,
     // Otel arrow service
@@ -162,6 +163,16 @@ pub struct GrpcServerConfig {
     // Max gRPC sending(encoding) message size
     pub max_send_message_size: usize,
     pub tls: TlsOption,
+}
+
+impl From<&GrpcOptions> for GrpcServerConfig {
+    fn from(opts: &GrpcOptions) -> Self {
+        Self {
+            max_recv_message_size: opts.max_recv_message_size.as_bytes() as usize,
+            max_send_message_size: opts.max_send_message_size.as_bytes() as usize,
+            tls: opts.tls.clone(),
+        }
+    }
 }
 
 impl Default for GrpcServerConfig {
@@ -206,6 +217,12 @@ impl GrpcServer {
             error!(e; "GRPC serve error");
         }
         Ok(())
+    }
+
+    /// Expose the routers that enable users to add new services before the
+    /// server starts.
+    pub fn routes(&self) -> Arc<Mutex<Option<Routes>>> {
+        self.routes.clone()
     }
 }
 

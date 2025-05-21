@@ -14,7 +14,7 @@
 
 use api::v1::greptime_database_server::GreptimeDatabase;
 use api::v1::greptime_response::Response as RawResponse;
-use api::v1::{AffectedRows, GreptimeRequest, GreptimeResponse, ResponseHeader};
+use api::v1::{AffectedRows, Arrow, GreptimeRequest, GreptimeResponse, ResponseHeader};
 use async_trait::async_trait;
 use common_error::status_code::StatusCode;
 use common_query::OutputData;
@@ -25,6 +25,7 @@ use tonic::{Request, Response, Status, Streaming};
 use crate::grpc::greptime_handler::GreptimeRequestHandler;
 use crate::grpc::{cancellation, TonicResult};
 use crate::hint_headers;
+use crate::http::result::arrow_result::write_arrow_bytes;
 
 pub(crate) struct DatabaseService {
     handler: GreptimeRequestHandler,
@@ -62,8 +63,36 @@ impl GreptimeDatabase for DatabaseService {
                     }),
                     response: Some(RawResponse::AffectedRows(AffectedRows { value: rows as _ })),
                 },
-                OutputData::Stream(_) | OutputData::RecordBatches(_) => {
-                    return Err(Status::unimplemented("GreptimeDatabase::Handle for query"));
+                OutputData::Stream(stream) => {
+                    let schema = stream.schema();
+                    let arrow_schema = schema.arrow_schema();
+                    let compression = None;
+                    let data = write_arrow_bytes(stream, arrow_schema, compression).await?;
+                    GreptimeResponse {
+                        header: Some(ResponseHeader {
+                            status: Some(api::v1::Status {
+                                status_code: StatusCode::Success as _,
+                                ..Default::default()
+                            }),
+                        }),
+                        response: Some(RawResponse::ArrowResp(Arrow { data })),
+                    }
+                }
+                OutputData::RecordBatches(rbs) => {
+                    let schema = rbs.schema();
+                    let arrow_schema = schema.arrow_schema();
+                    let stream = rbs.as_stream();
+                    let compression = None;
+                    let data = write_arrow_bytes(stream, arrow_schema, compression).await?;
+                    GreptimeResponse {
+                        header: Some(ResponseHeader {
+                            status: Some(api::v1::Status {
+                                status_code: StatusCode::Success as _,
+                                ..Default::default()
+                            }),
+                        }),
+                        response: Some(RawResponse::ArrowResp(Arrow { data })),
+                    }
                 }
             };
 

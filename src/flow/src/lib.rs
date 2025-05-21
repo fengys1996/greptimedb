@@ -36,7 +36,7 @@ pub mod heartbeat;
 mod metrics;
 mod plan;
 mod repr;
-mod server;
+pub mod server;
 mod transform;
 mod utils;
 

@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use api::v1::greptime_database_server::GreptimeDatabaseServer;
 use api::v1::prometheus_gateway_server::PrometheusGatewayServer;
 use api::v1::region::region_server::RegionServer;
@@ -176,7 +178,7 @@ impl GrpcServerBuilder {
 
     pub fn build(self) -> GrpcServer {
         GrpcServer {
-            routes: Mutex::new(Some(self.routes_builder.routes())),
+            routes: Arc::new(Mutex::new(Some(self.routes_builder.routes()))),
             shutdown_tx: Mutex::new(None),
             serve_state: Mutex::new(None),
             tls_config: self.tls_config,

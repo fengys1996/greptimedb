@@ -975,6 +975,7 @@ impl HttpServer {
 
     fn route_sql<S>(api_state: ApiState) -> Router<S> {
         Router::new()
+            // sql
             .route("/sql", routing::get(handler::sql).post(handler::sql))
             .route(
                 "/sql/parse",

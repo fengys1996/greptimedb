@@ -49,7 +49,7 @@ use crate::error::{
     ConvertFlightDataSnafu, Error, FlightGetSnafu, IllegalFlightMessagesSnafu,
     InvalidTonicMetadataValueSnafu, ServerSnafu,
 };
-use crate::{from_grpc_response, Client, Result};
+use crate::{from_grpc_response, from_grpc_response_1, Client, GreptimeResp, Result};
 
 type FlightDataStream = Pin<Box<dyn Stream<Item = FlightData> + Send>>;
 
@@ -184,6 +184,47 @@ impl Database {
         let value = AsciiMetadataValue::from_str(&value).context(InvalidTonicMetadataValueSnafu)?;
         metadata.insert(key, value);
         Ok(())
+    }
+
+    /// Retry if connection fails, max_retries is the max number of retries, so the total wait time
+    /// is `max_retries * GRPC_CONN_TIMEOUT`
+    pub async fn handle_with_retry_1(
+        &self,
+        request: Request,
+        max_retries: u32,
+    ) -> Result<GreptimeResp> {
+        let mut client = make_database_client(&self.client)?.inner;
+        let mut retries = 0;
+        let request = self.to_rpc_request(request);
+        loop {
+            let raw_response = client.handle(request.clone()).await;
+            match (raw_response, retries < max_retries) {
+                (Ok(resp), _) => return from_grpc_response_1(resp.into_inner()),
+                (Err(err), true) => {
+                    // determine if the error is retryable
+                    if is_grpc_retryable(&err) {
+                        // retry
+                        retries += 1;
+                        warn!("Retrying {} times with error = {:?}", retries, err);
+                        continue;
+                    }
+                }
+                (Err(err), false) => {
+                    error!(
+                        "Failed to send request to grpc handle after {} retries, error = {:?}",
+                        retries, err
+                    );
+                    return Err(err.into());
+                }
+            }
+        }
+    }
+
+    pub async fn handle_1(&self, request: Request) -> Result<GreptimeResp> {
+        let mut client = make_database_client(&self.client)?.inner;
+        let request = self.to_rpc_request(request);
+        let response = client.handle(request).await?.into_inner();
+        from_grpc_response_1(response)
     }
 
     pub async fn handle(&self, request: Request) -> Result<u32> {

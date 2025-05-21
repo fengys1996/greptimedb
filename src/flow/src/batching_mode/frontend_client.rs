@@ -19,7 +19,7 @@ use std::time::SystemTime;
 
 use api::v1::greptime_request::Request;
 use api::v1::CreateTableExpr;
-use client::{Client, Database};
+use client::{Client, Database, GreptimeResp, OutputData};
 use common_error::ext::{BoxedError, ErrorExt};
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::cluster::{NodeInfo, NodeInfoKey, Role};
@@ -27,6 +27,7 @@ use common_meta::peer::Peer;
 use common_meta::rpc::store::RangeRequest;
 use common_query::Output;
 use common_telemetry::warn;
+use futures::StreamExt;
 use meta_client::client::MetaClient;
 use rand::rng;
 use rand::seq::SliceRandom;
@@ -269,8 +270,96 @@ impl FrontendClient {
         .await
     }
 
+    pub async fn handle_1(
+        &self,
+        req: api::v1::greptime_request::Request,
+        catalog: &str,
+        schema: &str,
+        peer_desc: &mut Option<PeerDesc>,
+    ) -> Result<GreptimeResp, Error> {
+        match self {
+            FrontendClient::Distributed { .. } => {
+                let db = self.get_random_active_frontend(catalog, schema).await?;
+
+                *peer_desc = Some(PeerDesc::Dist {
+                    peer: db.peer.clone(),
+                });
+
+                db.database
+                    .handle_with_retry_1(req.clone(), GRPC_MAX_RETRIES)
+                    .await
+                    .with_context(|_| InvalidRequestSnafu {
+                        context: format!("Failed to handle request at {:?}: {:?}", db.peer, req),
+                    })
+            }
+            FrontendClient::Standalone { database_client } => {
+                let ctx = QueryContextBuilder::default()
+                    .current_catalog(catalog.to_string())
+                    .current_schema(schema.to_string())
+                    .build();
+                let ctx = Arc::new(ctx);
+                {
+                    let database_client = {
+                        database_client
+                            .lock()
+                            .map_err(|e| {
+                                UnexpectedSnafu {
+                                    reason: format!("Failed to lock database client: {e}"),
+                                }
+                                .build()
+                            })?
+                            .as_ref()
+                            .context(UnexpectedSnafu {
+                                reason: "Standalone's frontend instance is not set",
+                            })?
+                            .upgrade()
+                            .context(UnexpectedSnafu {
+                                reason: "Failed to upgrade database client",
+                            })?
+                    };
+                    let resp: common_query::Output = database_client
+                        .do_query(req.clone(), ctx)
+                        .await
+                        .map_err(BoxedError::new)
+                        .context(ExternalSnafu)?;
+                    match resp.data {
+                        OutputData::AffectedRows(rows) => {
+                            let rows = rows.try_into().map_err(|_| {
+                                UnexpectedSnafu {
+                                    reason: format!("Failed to convert rows to u32: {}", rows),
+                                }
+                                .build()
+                            })?;
+                            Ok(GreptimeResp::AffectedRows(rows))
+                        }
+                        OutputData::RecordBatches(record_batches) => {
+                            let rbs: Vec<_> = record_batches
+                                .into_iter()
+                                .map(|rb| rb.into_df_record_batch())
+                                .collect();
+                            Ok(GreptimeResp::Arrow(rbs))
+                        }
+                        OutputData::Stream(stream) => {
+                            let rbs = stream
+                                .collect::<Vec<_>>()
+                                .await
+                                .into_iter()
+                                .collect::<std::result::Result<Vec<_>, _>>()
+                                .unwrap();
+                            let rbs: Vec<_> = rbs
+                                .into_iter()
+                                .map(|rb| rb.into_df_record_batch())
+                                .collect();
+                            Ok(GreptimeResp::Arrow(rbs))
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Handle a request to frontend
-    pub(crate) async fn handle(
+    pub async fn handle(
         &self,
         req: api::v1::greptime_request::Request,
         catalog: &str,
@@ -344,7 +433,7 @@ impl FrontendClient {
 
 /// Describe a peer of frontend
 #[derive(Debug, Default)]
-pub(crate) enum PeerDesc {
+pub enum PeerDesc {
     /// Distributed mode's frontend peer address
     Dist {
         /// frontend peer address

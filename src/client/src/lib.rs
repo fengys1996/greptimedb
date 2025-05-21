@@ -26,6 +26,8 @@ pub mod region;
 pub use api;
 use api::v1::greptime_response::Response;
 use api::v1::{AffectedRows, GreptimeResponse};
+use arrow::ipc::reader::FileReader;
+use arrow_array::RecordBatch;
 pub use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::status_code::StatusCode;
 pub use common_query::{Output, OutputData, OutputMeta};
@@ -36,6 +38,49 @@ pub use self::client::Client;
 pub use self::database::Database;
 pub use self::error::{Error, Result};
 use crate::error::{IllegalDatabaseResponseSnafu, ServerSnafu};
+
+pub enum GreptimeResp {
+    AffectedRows(u32),
+    Arrow(Vec<RecordBatch>),
+}
+
+pub fn from_grpc_response_1(response: GreptimeResponse) -> Result<GreptimeResp> {
+    let header = response.header.context(IllegalDatabaseResponseSnafu {
+        err_msg: "missing header",
+    })?;
+    let status = header.status.context(IllegalDatabaseResponseSnafu {
+        err_msg: "missing status",
+    })?;
+
+    if StatusCode::is_success(status.status_code) {
+        let res = response.response.context(IllegalDatabaseResponseSnafu {
+            err_msg: "missing response",
+        })?;
+        match res {
+            Response::AffectedRows(AffectedRows { value }) => Ok(GreptimeResp::AffectedRows(value)),
+            Response::ArrowResp(arrow) => {
+                let reader = std::io::Cursor::new(arrow.data);
+                let reader = FileReader::try_new(reader, None).unwrap();
+                let mut rbs = vec![];
+                for rb in reader {
+                    let rb = rb.unwrap();
+                    rbs.push(rb);
+                }
+                Ok(GreptimeResp::Arrow(rbs))
+            }
+        }
+    } else {
+        let status_code =
+            StatusCode::from_u32(status.status_code).context(IllegalDatabaseResponseSnafu {
+                err_msg: format!("invalid status: {:?}", status),
+            })?;
+        ServerSnafu {
+            code: status_code,
+            msg: status.err_msg,
+        }
+        .fail()
+    }
+}
 
 pub fn from_grpc_response(response: GreptimeResponse) -> Result<u32> {
     let header = response.header.context(IllegalDatabaseResponseSnafu {
@@ -51,6 +96,7 @@ pub fn from_grpc_response(response: GreptimeResponse) -> Result<u32> {
         })?;
         match res {
             Response::AffectedRows(AffectedRows { value }) => Ok(value),
+            Response::ArrowResp(_arrow) => todo!(),
         }
     } else {
         let status_code =
