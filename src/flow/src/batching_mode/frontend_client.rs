@@ -19,7 +19,7 @@ use std::time::SystemTime;
 
 use api::v1::greptime_request::Request;
 use api::v1::CreateTableExpr;
-use client::{Client, Database};
+use client::{Client, Database, GreptimeResp, RecordBatches};
 use common_error::ext::{BoxedError, ErrorExt};
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::cluster::{NodeInfo, NodeInfoKey, Role};
@@ -38,7 +38,9 @@ use crate::batching_mode::{
     DEFAULT_BATCHING_ENGINE_QUERY_TIMEOUT, FRONTEND_ACTIVITY_TIMEOUT, GRPC_CONN_TIMEOUT,
     GRPC_MAX_RETRIES,
 };
-use crate::error::{ExternalSnafu, InvalidRequestSnafu, NoAvailableFrontendSnafu, UnexpectedSnafu};
+use crate::error::{
+    self, ExternalSnafu, InvalidRequestSnafu, NoAvailableFrontendSnafu, UnexpectedSnafu,
+};
 use crate::{Error, FlowAuthHeader};
 
 /// Just like [`GrpcQueryHandler`] but use BoxedError
@@ -270,6 +272,100 @@ impl FrontendClient {
     }
 
     /// Handle a request to frontend
+    pub async fn handle_v2(
+        &self,
+        req: api::v1::greptime_request::Request,
+        catalog: &str,
+        schema: &str,
+        peer_desc: &mut Option<PeerDesc>,
+    ) -> Result<common_query::Output, Error> {
+        match self {
+            FrontendClient::Distributed { .. } => {
+                let db = self.get_random_active_frontend(catalog, schema).await?;
+
+                *peer_desc = Some(PeerDesc::Dist {
+                    peer: db.peer.clone(),
+                });
+
+                let rpc_result = db
+                    .database
+                    .handle_with_retry_v2(req.clone(), GRPC_MAX_RETRIES)
+                    .await
+                    .with_context(|_| InvalidRequestSnafu {
+                        context: format!("Failed to handle request at {:?}: {:?}", db.peer, req),
+                    })?;
+
+                let GreptimeResp::Arrow(arrow) = rpc_result else {
+                    return UnexpectedSnafu {
+                        reason: "Unexpected response type",
+                    }
+                    .fail();
+                };
+
+                if arrow.is_empty() {
+                    return Ok(common_query::Output::new_with_record_batches(
+                        RecordBatches::empty(),
+                    ));
+                }
+
+                let schema: datatypes::schema::Schema = arrow[0]
+                    .schema()
+                    .try_into()
+                    .context(error::DatatypesSnafu { extra: "" })?;
+                let schema = Arc::new(schema);
+
+                let rbs = arrow
+                    .into_iter()
+                    .map(|batch| {
+                        common_recordbatch::RecordBatch::try_from_df_record_batch(
+                            schema.clone(),
+                            batch,
+                        )
+                        .context(error::CommonRecordBatchSnafu)
+                    })
+                    .collect::<Result<Vec<_>, Error>>()?;
+
+                let rbs =
+                    RecordBatches::try_new(schema, rbs).context(error::CommonRecordBatchSnafu)?;
+
+                Ok(Output::new_with_record_batches(rbs))
+            }
+            FrontendClient::Standalone { database_client } => {
+                let ctx = QueryContextBuilder::default()
+                    .current_catalog(catalog.to_string())
+                    .current_schema(schema.to_string())
+                    .build();
+                let ctx = Arc::new(ctx);
+                {
+                    let database_client = {
+                        database_client
+                            .lock()
+                            .map_err(|e| {
+                                UnexpectedSnafu {
+                                    reason: format!("Failed to lock database client: {e}"),
+                                }
+                                .build()
+                            })?
+                            .as_ref()
+                            .context(UnexpectedSnafu {
+                                reason: "Standalone's frontend instance is not set",
+                            })?
+                            .upgrade()
+                            .context(UnexpectedSnafu {
+                                reason: "Failed to upgrade database client",
+                            })?
+                    };
+                    database_client
+                        .do_query(req.clone(), ctx)
+                        .await
+                        .map_err(BoxedError::new)
+                        .context(ExternalSnafu)
+                }
+            }
+        }
+    }
+
+    /// Handle a request to frontend
     pub(crate) async fn handle(
         &self,
         req: api::v1::greptime_request::Request,
@@ -344,7 +440,7 @@ impl FrontendClient {
 
 /// Describe a peer of frontend
 #[derive(Debug, Default)]
-pub(crate) enum PeerDesc {
+pub enum PeerDesc {
     /// Distributed mode's frontend peer address
     Dist {
         /// frontend peer address

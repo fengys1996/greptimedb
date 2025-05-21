@@ -290,6 +290,13 @@ pub enum Error {
         location: Location,
         source: operator::error::Error,
     },
+
+    #[snafu(display("Common recordbatch error"))]
+    CommonRecordBatch {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_recordbatch::error::Error,
+    },
 }
 
 /// the outer message is the full error stack, and inner message in header is the last error message that can be show directly to user
@@ -329,6 +336,7 @@ impl ErrorExt for Error {
             }
             Self::Unexpected { .. }
             | Self::SyncCheckTask { .. }
+            | Self::CommonRecordBatch { .. }
             | Self::IllegalCheckTaskState { .. } => StatusCode::Unexpected,
             Self::NotImplemented { .. }
             | Self::UnsupportedTemporalFilter { .. }
