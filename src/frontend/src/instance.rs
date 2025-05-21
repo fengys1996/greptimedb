@@ -455,6 +455,7 @@ pub fn check_permission(
         // Will be checked in execution.
         // TODO(dennis): add a hook for admin commands.
         Statement::Admin(_) => {}
+        Statement::CreateTrigger(_) => {}
         // These are executed by query engine, and will be checked there.
         Statement::Query(_)
         | Statement::Explain(_)

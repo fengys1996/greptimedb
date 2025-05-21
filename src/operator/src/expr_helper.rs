@@ -17,13 +17,15 @@ use std::collections::{HashMap, HashSet};
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::alter_database_expr::Kind as AlterDatabaseKind;
 use api::v1::alter_table_expr::Kind as AlterTableKind;
+use api::v1::channel::Options;
 use api::v1::column_def::options_from_column_schema;
 use api::v1::{
-    set_index, unset_index, AddColumn, AddColumns, AlterDatabaseExpr, AlterTableExpr, Analyzer,
-    ColumnDataType, ColumnDataTypeExtension, CreateFlowExpr, CreateTableExpr, CreateViewExpr,
-    DropColumn, DropColumns, ExpireAfter, FulltextBackend as PbFulltextBackend, ModifyColumnType,
-    ModifyColumnTypes, RenameTable, SemanticType, SetDatabaseOptions, SetFulltext, SetIndex,
-    SetInverted, SetSkipping, SetTableOptions, SkippingIndexType as PbSkippingIndexType, TableName,
+    set_index, unset_index, AddColumn, AddColumns, AlertManagerOptions, AlterDatabaseExpr,
+    AlterTableExpr, Analyzer, Channel, ColumnDataType, ColumnDataTypeExtension, CreateFlowExpr,
+    CreateTableExpr, CreateTriggerExpr, CreateViewExpr, DropColumn, DropColumns, ExpireAfter,
+    FulltextBackend as PbFulltextBackend, ModifyColumnType, ModifyColumnTypes, RenameTable,
+    SemanticType, SetDatabaseOptions, SetFulltext, SetIndex, SetInverted, SetSkipping,
+    SetTableOptions, Severity, SkippingIndexType as PbSkippingIndexType, TableName,
     UnsetDatabaseOptions, UnsetFulltext, UnsetIndex, UnsetInverted, UnsetSkipping,
     UnsetTableOptions,
 };
@@ -47,7 +49,8 @@ use sql::statements::alter::{
     AlterDatabase, AlterDatabaseOperation, AlterTable, AlterTableOperation,
 };
 use sql::statements::create::{
-    Column as SqlColumn, CreateExternalTable, CreateFlow, CreateTable, CreateView, TableConstraint,
+    Column as SqlColumn, CreateExternalTable, CreateFlow, CreateTable, CreateTrigger, CreateView,
+    NotifyChannel, TableConstraint,
 };
 use sql::statements::{
     column_to_schema, sql_column_def_to_grpc_column_def, sql_data_type_to_concrete_data_type,
@@ -60,8 +63,8 @@ use crate::error::{
     BuildCreateExprOnInsertionSnafu, ColumnDataTypeSnafu, ConvertColumnDefaultConstraintSnafu,
     ConvertIdentifierSnafu, EncodeJsonSnafu, ExternalSnafu, FindNewColumnsOnInsertionSnafu,
     IllegalPrimaryKeysDefSnafu, InferFileTableSchemaSnafu, InvalidFlowNameSnafu, InvalidSqlSnafu,
-    NotSupportedSnafu, ParseSqlSnafu, PrepareFileTableSnafu, Result, SchemaIncompatibleSnafu,
-    UnrecognizedTableOptionSnafu,
+    InvalidTriggerNameSnafu, NotSupportedSnafu, ParseSqlSnafu, PrepareFileTableSnafu, Result,
+    SchemaIncompatibleSnafu, UnrecognizedTableOptionSnafu,
 };
 
 pub fn create_table_expr_by_column_schemas(
@@ -691,6 +694,61 @@ pub fn to_create_view_expr(
     };
 
     Ok(expr)
+}
+
+// TODO(fys): add test cases for this function.
+pub fn to_create_trigger_task_expr(
+    create_trigger: CreateTrigger,
+    query_ctx: &QueryContextRef,
+) -> Result<CreateTriggerExpr> {
+    let catalog_name = query_ctx.current_catalog().to_string();
+    let trigger_name = sanitize_trigger_name(create_trigger.trigger_name)?;
+    let create_if_not_exists = create_trigger.if_not_exists;
+    // TODO(fys): sanitize query sql.
+    let sql = create_trigger.query.to_string();
+    let severity = Severity::Warning as i32;
+
+    let labels = HashMap::new();
+    let annotations = HashMap::new();
+
+    let channel = create_trigger.channel;
+
+    let options = match channel {
+        NotifyChannel::Webhook(am) => {
+            Channel {
+                options: Some(Options::AlertManagerOpts(AlertManagerOptions {
+                    url: am.url.to_string(),
+                    // TODO(fys)
+                    timeout: 0,
+                })),
+            }
+        }
+    };
+    let channels = vec![options];
+
+    Ok(CreateTriggerExpr {
+        catalog_name,
+        trigger_name,
+        create_if_not_exists,
+        sql,
+        channels,
+        severity,
+        labels,
+        annotations,
+        interval: create_trigger.interval * 1000,
+    })
+}
+
+/// Sanitize the trigger name, remove possible quotes
+fn sanitize_trigger_name(mut trigger_name: ObjectName) -> Result<String> {
+    ensure!(
+        trigger_name.0.len() == 1,
+        InvalidTriggerNameSnafu {
+            name: trigger_name.to_string(),
+        }
+    );
+    // safety: we've checked trigger_name.0 has exactly one element.
+    Ok(trigger_name.0.swap_remove(0).value)
 }
 
 pub fn to_create_flow_task_expr(

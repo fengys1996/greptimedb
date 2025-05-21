@@ -359,6 +359,39 @@ impl Display for CreateTableLike {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut, Serialize)]
+pub struct CreateTrigger {
+    /// Trigger name
+    pub trigger_name: ObjectName,
+    /// Create if not exist
+    pub if_not_exists: bool,
+    /// SQL statement
+    pub query: Box<Query>,
+    /// The interval of exec query.
+    /// Unit in second.
+    pub interval: u64,
+    pub channel: NotifyChannel,
+}
+
+// TODO: fix it
+impl Display for CreateTrigger {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CREATE TRIGGER ")
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut, Serialize)]
+pub enum NotifyChannel {
+    /// Alert manager webhook options.
+    Webhook(AlertManagerWebhook),
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut, Serialize)]
+pub struct AlertManagerWebhook {
+    pub url: Ident,
+    pub options: OptionMap,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut, Serialize)]
 pub struct CreateFlow {
     /// Flow name
     pub flow_name: ObjectName,

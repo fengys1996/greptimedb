@@ -703,6 +703,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid trigger name: {name}"))]
+    InvalidTriggerName {
+        name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Empty {} expr", name))]
     EmptyDdlExpr {
         name: String,
@@ -851,6 +858,7 @@ impl ErrorExt for Error {
             | Error::InvalidTableName { .. }
             | Error::InvalidViewName { .. }
             | Error::InvalidFlowName { .. }
+            | Error::InvalidTriggerName { .. }
             | Error::InvalidView { .. }
             | Error::InvalidExpr { .. }
             | Error::AdminFunctionNotFound { .. }

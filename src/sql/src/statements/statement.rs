@@ -19,6 +19,7 @@ use serde::Serialize;
 use sqlparser::ast::Statement as SpStatement;
 use sqlparser_derive::{Visit, VisitMut};
 
+use super::create::CreateTrigger;
 use crate::error::{ConvertToDfStatementSnafu, Error};
 use crate::statements::admin::Admin;
 use crate::statements::alter::{AlterDatabase, AlterTable};
@@ -60,6 +61,7 @@ pub enum Statement {
     CreateTableLike(CreateTableLike),
     // CREATE FLOW
     CreateFlow(CreateFlow),
+    CreateTrigger(CreateTrigger),
     // CREATE VIEW ... AS
     CreateView(CreateView),
     // DROP TABLE
@@ -184,6 +186,7 @@ impl Display for Statement {
             Statement::DeclareCursor(s) => s.fmt(f),
             Statement::FetchCursor(s) => s.fmt(f),
             Statement::CloseCursor(s) => s.fmt(f),
+            Statement::CreateTrigger(s) => s.fmt(f),
         }
     }
 }

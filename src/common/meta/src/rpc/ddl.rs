@@ -78,6 +78,10 @@ impl DdlTask {
         DdlTask::CreateFlow(expr)
     }
 
+    pub fn new_create_trigger(expr: CreateTriggerTask) -> Self {
+        DdlTask::CreateTrigger(expr)
+    }
+
     /// Creates a [`DdlTask`] to drop a flow.
     pub fn new_drop_flow(expr: DropFlowTask) -> Self {
         DdlTask::DropFlow(expr)

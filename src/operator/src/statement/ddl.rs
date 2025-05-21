@@ -16,9 +16,10 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
-use api::v1::meta::CreateFlowTask as PbCreateFlowTask;
+use api::v1::meta::{CreateFlowTask as PbCreateFlowTask, CreateTriggerTask as PbCreateTriggerTask};
 use api::v1::{
-    column_def, AlterDatabaseExpr, AlterTableExpr, CreateFlowExpr, CreateTableExpr, CreateViewExpr,
+    column_def, AlterDatabaseExpr, AlterTableExpr, CreateFlowExpr, CreateTableExpr,
+    CreateTriggerExpr, CreateViewExpr,
 };
 use catalog::CatalogManagerRef;
 use chrono::Utc;
@@ -35,6 +36,7 @@ use common_meta::rpc::ddl::{
     CreateFlowTask, DdlTask, DropFlowTask, DropViewTask, SubmitDdlTaskRequest,
     SubmitDdlTaskResponse,
 };
+use common_meta::rpc::ddl_trigger::CreateTriggerTask;
 use common_meta::rpc::router::{Partition, Partition as MetaPartition};
 use common_query::Output;
 use common_telemetry::{debug, info, tracing, warn};
@@ -58,7 +60,8 @@ use session::table_name::table_idents_to_full_name;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::statements::alter::{AlterDatabase, AlterTable};
 use sql::statements::create::{
-    CreateExternalTable, CreateFlow, CreateTable, CreateTableLike, CreateView, Partitions,
+    CreateExternalTable, CreateFlow, CreateTable, CreateTableLike, CreateTrigger, CreateView,
+    Partitions,
 };
 use sql::statements::sql_value_to_value;
 use sql::statements::statement::Statement;
@@ -340,6 +343,46 @@ impl StatementExecutor {
             .into_iter()
             .map(|x| DistTable::table(Arc::new(x)))
             .collect())
+    }
+
+    #[tracing::instrument(skip_all)]
+    pub async fn create_trigger(
+        &self,
+        stmt: CreateTrigger,
+        query_context: QueryContextRef,
+    ) -> Result<Output> {
+        let expr = expr_helper::to_create_trigger_task_expr(stmt, &query_context)?;
+        self.create_trigger_inner(expr, query_context).await
+    }
+
+    pub async fn create_trigger_inner(
+        &self,
+        expr: CreateTriggerExpr,
+        query_context: QueryContextRef,
+    ) -> Result<Output> {
+        self.create_trigger_procedure(expr, query_context).await?;
+        Ok(Output::new_with_affected_rows(0))
+    }
+
+    async fn create_trigger_procedure(
+        &self,
+        expr: CreateTriggerExpr,
+        query_context: QueryContextRef,
+    ) -> Result<SubmitDdlTaskResponse> {
+        let task = CreateTriggerTask::try_from(PbCreateTriggerTask {
+            create_trigger: Some(expr),
+        })
+        .context(error::InvalidExprSnafu)?;
+
+        let request = SubmitDdlTaskRequest {
+            query_context,
+            task: DdlTask::new_create_trigger(task),
+        };
+
+        self.procedure_executor
+            .submit_ddl_task(&ExecutorContext::default(), request)
+            .await
+            .context(error::ExecuteDdlSnafu)
     }
 
     #[tracing::instrument(skip_all)]

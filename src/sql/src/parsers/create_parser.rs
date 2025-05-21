@@ -31,16 +31,17 @@ use table::requests::validate_table_option;
 use crate::ast::{ColumnDef, Ident};
 use crate::error::{
     self, InvalidColumnOptionSnafu, InvalidDatabaseOptionSnafu, InvalidIntervalSnafu,
-    InvalidSqlSnafu, InvalidTableOptionSnafu, InvalidTimeIndexSnafu, MissingTimeIndexSnafu, Result,
-    SyntaxSnafu, UnexpectedSnafu, UnsupportedSnafu,
+    InvalidNotifyChannelSnafu, InvalidSqlSnafu, InvalidTableOptionSnafu, InvalidTimeIndexSnafu,
+    MissingTimeIndexSnafu, Result, SyntaxSnafu, UnexpectedSnafu, UnsupportedSnafu,
 };
 use crate::parser::{ParserContext, FLOW};
 use crate::parsers::utils::{
     self, validate_column_fulltext_create_option, validate_column_skipping_index_create_option,
 };
 use crate::statements::create::{
-    Column, ColumnExtensions, CreateDatabase, CreateExternalTable, CreateFlow, CreateTable,
-    CreateTableLike, CreateView, Partitions, TableConstraint, VECTOR_OPT_DIM,
+    AlertManagerWebhook, Column, ColumnExtensions, CreateDatabase, CreateExternalTable, CreateFlow,
+    CreateTable, CreateTableLike, CreateTrigger, CreateView, NotifyChannel, Partitions,
+    TableConstraint, VECTOR_OPT_DIM,
 };
 use crate::statements::statement::Statement;
 use crate::statements::transform::type_alias::get_data_type_by_alias_name;
@@ -55,10 +56,24 @@ pub const AFTER: &str = "AFTER";
 pub const INVERTED: &str = "INVERTED";
 pub const SKIPPING: &str = "SKIPPING";
 
+pub const EXEC: &str = "EXEC";
+pub const EXECUTE: &str = "EXECUTE";
+pub const QUERY: &str = "QUERY";
+pub const ON: &str = "ON";
+pub const EVERY: &str = "EVERY";
+pub const NOTIFY: &str = "NOTIFY";
+pub const WEBHOOK: &str = "WEBHOOK";
+
 const DB_OPT_KEY_TTL: &str = "ttl";
 
 fn validate_database_option(key: &str) -> bool {
     [DB_OPT_KEY_TTL].contains(&key)
+}
+
+const TRIGGER_NOTIFY_KEY: &str = "timeout";
+
+fn validate_trigger_notify_option(key: &str) -> bool {
+    [TRIGGER_NOTIFY_KEY].contains(&key)
 }
 
 /// Parses create [table] statement
@@ -98,6 +113,11 @@ impl<'a> ParserContext<'a> {
                     self.parse_create_view(false)
                 }
 
+                Keyword::TRIGGER => {
+                    let _ = self.parser.next_token();
+                    self.parse_create_trigger()
+                }
+
                 Keyword::NoKeyword => {
                     let _ = self.parser.next_token();
                     let uppercase = w.value.to_uppercase();
@@ -110,6 +130,123 @@ impl<'a> ParserContext<'a> {
             },
             unexpected => self.unsupported(unexpected.to_string()),
         }
+    }
+
+    // TODO:(fys): complete parser, add unit test for it.
+    fn parse_create_trigger(&mut self) -> Result<Statement> {
+        let if_not_exists = self.parse_if_not_exist()?;
+        let trigger_name = self.intern_parse_table_name()?;
+
+        if let Token::Word(w) = self.parser.peek_token().token
+            && (w.value.eq_ignore_ascii_case(EXECUTE) || w.value.eq_ignore_ascii_case(EXEC))
+        {
+            self.parser.next_token();
+        } else {
+            return self.expected("`EXEC`/`EXECUTE` keyword", self.parser.peek_token());
+        }
+
+        if let Token::Word(w) = self.parser.peek_token().token
+            && w.value.eq_ignore_ascii_case(QUERY)
+        {
+            self.parser.next_token();
+        } else {
+            return self.expected("`QUERY` keyword", self.parser.peek_token());
+        }
+
+        let query = self.parser.parse_query().context(SyntaxSnafu)?;
+
+        if let Token::Word(w) = self.parser.peek_token().token
+            && w.value.eq_ignore_ascii_case(ON)
+        {
+            self.parser.next_token();
+        } else {
+            return self.expected("`ON` keyword", self.parser.peek_token());
+        }
+
+        if let Token::Word(w) = self.parser.peek_token().token
+            && w.value.eq_ignore_ascii_case(EVERY)
+        {
+            self.parser.next_token();
+        } else {
+            return self.expected("`EVERY` keyword", self.parser.peek_token());
+        }
+
+        // TODO(fys): extract this convert to common module?
+        let exec_interval = self.parser.parse_expr().context(SyntaxSnafu)?;
+        let exec_interval = utils::parser_expr_to_scalar_value(exec_interval.clone())?
+            .cast_to(&ArrowDataType::Interval(IntervalUnit::MonthDayNano))
+            .ok()
+            .with_context(|| InvalidIntervalSnafu {
+                reason: format!("cannot cast {} to interval type", exec_interval),
+            })?;
+        let exec_interval = if let ScalarValue::IntervalMonthDayNano(Some(interval)) = exec_interval
+        {
+            interval.nanoseconds / 1_000_000_000
+                + interval.days as i64 * 60 * 60 * 24
+                + interval.months as i64 * 60 * 60 * 24 * 3044 / 1000 // 1 month=365.25/12=30.44 days
+                                                                      // this is to keep the same as https://docs.rs/humantime/latest/humantime/fn.parse_duration.html
+                                                                      // which we use in database to parse i.e. ttl interval and many other intervals
+        } else {
+            unreachable!()
+        };
+
+        let channel = self.parse_notify_channel()?;
+
+        let crate_trigger = CreateTrigger {
+            trigger_name,
+            if_not_exists,
+            query,
+            interval: exec_interval as u64,
+            channel,
+        };
+
+        Ok(Statement::CreateTrigger(crate_trigger))
+    }
+
+    fn parse_notify_channel(&mut self) -> Result<NotifyChannel> {
+        if let Token::Word(w) = self.parser.peek_token().token
+            && w.value.eq_ignore_ascii_case(NOTIFY)
+        {
+            self.parser.next_token();
+        } else {
+            return self.expected("`NOTIFY` keyword", self.parser.peek_token());
+        }
+
+        let Token::Word(channel_name) = self.parser.peek_token().token else {
+            return self.expected("notify channel", self.parser.peek_token());
+        };
+
+        if channel_name.value.eq_ignore_ascii_case(WEBHOOK) {
+            self.parser.next_token();
+            let url = self.parser.parse_identifier().context(SyntaxSnafu)?;
+
+            let options = self
+                .parser
+                .parse_options(Keyword::WITH)
+                .context(SyntaxSnafu)?
+                .into_iter()
+                .map(parse_option_string)
+                .collect::<Result<HashMap<String, String>>>()?;
+
+            for key in options.keys() {
+                ensure!(
+                    validate_trigger_notify_option(key),
+                    InvalidDatabaseOptionSnafu {
+                        key: key.to_string()
+                    }
+                );
+            }
+
+            return Ok(NotifyChannel::Webhook(AlertManagerWebhook {
+                url,
+                options: options.into(),
+            }));
+        }
+
+        InvalidNotifyChannelSnafu {
+            channel: channel_name.value,
+        }
+        .fail()
     }
 
     /// Parse `CREAVE VIEW` statement.

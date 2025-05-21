@@ -224,6 +224,7 @@ impl StatementExecutor {
                 Ok(Output::new_with_affected_rows(0))
             }
             Statement::CreateFlow(stmt) => self.create_flow(stmt, query_ctx).await,
+            Statement::CreateTrigger(stmt) => self.create_trigger(stmt, query_ctx).await,
             Statement::DropFlow(stmt) => {
                 self.drop_flow(
                     query_ctx.current_catalog().to_string(),

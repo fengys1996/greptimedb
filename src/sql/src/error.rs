@@ -45,6 +45,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid notify channel: {}", channel))]
+    InvalidNotifyChannel {
+        channel: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display(
         "Unexpected token while parsing SQL statement, expected: '{}', found: {}",
         expected,
@@ -400,6 +407,7 @@ impl ErrorExt for Error {
             | InvalidUnaryOp { .. }
             | InvalidPartitionNumber { .. }
             | UnsupportedUnaryOp { .. }
+            | InvalidNotifyChannel { .. }
             | ConvertStr { .. } => StatusCode::InvalidArguments,
 
             SerializeColumnDefaultConstraint { source, .. } => source.status_code(),
