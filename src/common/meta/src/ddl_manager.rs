@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::any::Any;
 use std::sync::Arc;
 
 use api::v1::meta::ProcedureDetailResponse;
@@ -80,9 +81,13 @@ pub struct DdlManager {
 pub trait TriggerDdlManager: Send + Sync {
     async fn create_trigger(
         &self,
+        procedure_manager: ProcedureManagerRef,
+        ddl_context: DdlContext,
         create_trigger_task: CreateTriggerTask,
         query_context: QueryContext,
     ) -> Result<SubmitDdlTaskResponse>;
+
+    fn as_any(&self) -> &dyn Any;
 }
 
 pub type TriggerDdlManagerRef = Arc<dyn TriggerDdlManager>;
@@ -662,7 +667,13 @@ async fn handle_create_trigger_task(
         .fail();
     };
 
-    m.create_trigger(create_trigger_task, query_context).await
+    m.create_trigger(
+        ddl_manager.procedure_manager.clone(),
+        ddl_manager.ddl_context.clone(),
+        create_trigger_task,
+        query_context,
+    )
+    .await
 }
 
 async fn handle_create_flow_task(

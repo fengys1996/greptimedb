@@ -471,6 +471,7 @@ impl MetasrvBuilder {
             cache_invalidator,
             leader_region_registry,
             wal_prune_ticker,
+            selector_ctx,
         })
     }
 }

@@ -450,6 +450,7 @@ pub struct Metasrv {
     selector: SelectorRef,
     // The flow selector is used to select a target flownode.
     flow_selector: SelectorRef,
+    selector_ctx: SelectorContext,
     handler_group: RwLock<Option<HeartbeatHandlerGroupRef>>,
     handler_group_builder: Mutex<Option<HeartbeatHandlerGroupBuilder>>,
     election: Option<ElectionRef>,
@@ -673,6 +674,10 @@ impl Metasrv {
 
     pub fn flow_selector(&self) -> &SelectorRef {
         &self.flow_selector
+    }
+
+    pub fn selector_ctx(&self) -> &SelectorContext {
+        &self.selector_ctx
     }
 
     pub fn handler_group(&self) -> Option<HeartbeatHandlerGroupRef> {

@@ -34,6 +34,7 @@ members = [
     "src/common/telemetry",
     "src/common/test-util",
     "src/common/time",
+    "src/common/trigger",
     "src/common/version",
     "src/common/wal",
     "src/common/workload",
