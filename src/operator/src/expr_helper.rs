@@ -717,7 +717,8 @@ pub fn to_create_trigger_task_expr(
         NotifyChannel::Webhook(am) => {
             Channel {
                 options: Some(Options::AlertManagerOpts(AlertManagerOptions {
-                    url: am.url.to_string(),
+                    // TODO(fys): sanitize url
+                    url: am.url.value,
                     // TODO(fys)
                     timeout: 0,
                 })),

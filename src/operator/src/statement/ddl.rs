@@ -379,6 +379,8 @@ impl StatementExecutor {
             task: DdlTask::new_create_trigger(task),
         };
 
+        info!("create trigger procedure request");
+
         self.procedure_executor
             .submit_ddl_task(&ExecutorContext::default(), request)
             .await

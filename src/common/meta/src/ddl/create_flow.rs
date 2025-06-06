@@ -27,6 +27,7 @@ use common_procedure::{
     Context as ProcedureContext, LockKey, Procedure, Result as ProcedureResult, Status,
 };
 use common_telemetry::info;
+use common_telemetry::tracing::warn;
 use common_telemetry::tracing_context::TracingContext;
 use futures::future::join_all;
 use itertools::Itertools;

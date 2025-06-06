@@ -32,7 +32,7 @@ use common_meta::kv_backend::rds::PgStore;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
 #[cfg(feature = "pg_kvbackend")]
 use common_telemetry::error;
-use common_telemetry::info;
+use common_telemetry::{info, warn};
 #[cfg(feature = "pg_kvbackend")]
 use deadpool_postgres::{Config, Runtime};
 use etcd_client::Client;
@@ -104,6 +104,7 @@ impl MetasrvInstance {
         let metasrv = Arc::new(metasrv);
         // put metasrv into plugins for later use
         plugins.insert::<Arc<Metasrv>>(metasrv.clone());
+        warn!("insert meta srv to plugins");
         let export_metrics_task = ExportMetricsTask::try_new(&opts.export_metrics, Some(&plugins))
             .context(error::InitExportMetricsTaskSnafu)?;
         Ok(MetasrvInstance {

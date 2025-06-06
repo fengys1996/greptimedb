@@ -50,5 +50,5 @@ pub(crate) use engine::{CreateFlowArgs, FlowId, TableName};
 pub use error::{Error, Result};
 pub use server::{
     get_flow_auth_options, FlownodeBuilder, FlownodeInstance, FlownodeServer,
-    FlownodeServiceBuilder, FrontendInvoker,
+    FlownodeServiceBuilder, FrontendInvoker, ServerHandleMut,
 };

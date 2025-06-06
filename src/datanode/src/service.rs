@@ -92,13 +92,9 @@ impl<'a> DatanodeServiceBuilder<'a> {
         opts: &DatanodeOptions,
         region_server: &RegionServer,
     ) -> GrpcServerBuilder {
-        let config = GrpcServerConfig {
-            max_recv_message_size: opts.grpc.max_recv_message_size.as_bytes() as usize,
-            max_send_message_size: opts.grpc.max_send_message_size.as_bytes() as usize,
-            tls: opts.grpc.tls.clone(),
-        };
+        let grpc_opts: GrpcServerConfig = (&opts.grpc).into();
 
-        GrpcServerBuilder::new(config, region_server.runtime())
+        GrpcServerBuilder::new(grpc_opts, region_server.runtime())
             .flight_handler(Arc::new(region_server.clone()))
             .region_server_handler(Arc::new(region_server.clone()))
     }

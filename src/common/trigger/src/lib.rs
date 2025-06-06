@@ -11,11 +11,12 @@ use serde::{Deserialize, Serialize};
 pub type TriggerId = u64;
 
 /// The severity level of the trigger.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub enum Severity {
     Critical,
     Warning,
     Info,
+    #[default]
     Unknown,
 }
 
@@ -54,27 +55,32 @@ pub struct TriggerTaskMetadata {
     pub annotations: Annotations,
     pub interval: Duration,
 }
-
 /// The available channels for sending trigger notifications.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum TriggerChannel {
     AlertManagerWebhook(AlertManagerOptions),
 }
 
+/// Configuration options for Prometheus AlertManager integration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AlertManagerOptions {
     /// The URL of the AlertManager API endpoint.
     ///
     /// e.g., "http://localhost:9093".
     pub url: String,
+
     /// The timeout duration for the HTTP request.
     ///
     /// The timeout is applied from when the request starts connecting until the
-    /// response body has finished.
+    /// response body has finished. If it is None, no timeout is applied.
     pub timeout: Option<Duration>,
 }
 
-/// Formats trigger fully-qualified name.
+/// Formats a trigger's fully-qualified name by combining catalog and trigger name.
+///
+/// # Returns
+///
+/// A string formatted as "{catalog}.{trigger}"
 pub fn format_full_trigger_name(catalog: &str, trigger: &str) -> String {
     format!("{catalog}.{trigger}")
 }
@@ -82,6 +88,15 @@ pub fn format_full_trigger_name(catalog: &str, trigger: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_severity_display() {
+        assert_eq!(Severity::Critical.to_string(), "critical");
+        assert_eq!(Severity::Warning.to_string(), "warning");
+        assert_eq!(Severity::Info.to_string(), "info");
+        assert_eq!(Severity::Unknown.to_string(), "unknown");
+        assert_eq!(Severity::default().to_string(), "warning");
+    }
 
     #[test]
     fn test_format_full_trigger_name() {

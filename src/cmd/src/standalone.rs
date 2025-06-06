@@ -67,7 +67,7 @@ use frontend::service_config::{
     InfluxdbOptions, JaegerOptions, MysqlOptions, OpentsdbOptions, PostgresOptions,
     PromStoreOptions,
 };
-use meta_srv::metasrv::{FLOW_ID_SEQ, TABLE_ID_SEQ};
+use meta_srv::metasrv::{MetasrvOptions, FLOW_ID_SEQ, TABLE_ID_SEQ};
 use mito2::config::MitoConfig;
 use query::stats::StatementStatistics;
 use serde::{Deserialize, Serialize};
@@ -249,8 +249,21 @@ pub struct Instance {
     flownode: FlownodeInstance,
     procedure_manager: ProcedureManagerRef,
     wal_options_allocator: WalOptionsAllocatorRef,
+    pub components: Components,
     // Keep the logging guard to prevent the worker from being dropped.
     _guard: Vec<WorkerGuard>,
+}
+
+pub struct Components {
+    pub kv_backend: KvBackendRef,
+    pub frontend_client: Arc<FrontendClient>,
+    pub plugins: Plugins,
+}
+
+impl Instance {
+    pub fn plugins(&self) -> &Plugins {
+        &self.components.plugins
+    }
 }
 
 impl Instance {
@@ -468,6 +481,8 @@ impl StartCommand {
             .await
             .context(error::StartDatanodeSnafu)?;
 
+        let _ = plugins::setup_metasrv_plugins(&mut plugins, &[], &MetasrvOptions::default()).await;
+
         set_default_timezone(fe_opts.default_timezone.as_deref())
             .context(error::InitTimezoneSnafu)?;
 
@@ -524,13 +539,15 @@ impl StartCommand {
         // actually make a connection
         let (frontend_client, frontend_instance_handler) =
             FrontendClient::from_empty_grpc_handler();
+        let frontend_client = Arc::new(frontend_client);
+
         let flow_builder = FlownodeBuilder::new(
             flownode_options,
             plugins.clone(),
             table_metadata_manager.clone(),
             catalog_manager.clone(),
             flow_metadata_manager.clone(),
-            Arc::new(frontend_client.clone()),
+            frontend_client.clone(),
         );
         let flownode = flow_builder
             .build()
@@ -630,7 +647,7 @@ impl StartCommand {
         let export_metrics_task = ExportMetricsTask::try_new(&opts.export_metrics, Some(&plugins))
             .context(error::ServersSnafu)?;
 
-        let servers = Services::new(opts, fe_instance.clone(), plugins)
+        let servers = Services::new(opts, fe_instance.clone(), plugins.clone())
             .build()
             .context(error::StartFrontendSnafu)?;
 
@@ -640,6 +657,11 @@ impl StartCommand {
             heartbeat_task: None,
             export_metrics_task,
         };
+        let components = Components {
+            kv_backend,
+            frontend_client,
+            plugins,
+        };
 
         Ok(Instance {
             datanode,
@@ -647,6 +669,7 @@ impl StartCommand {
             flownode,
             procedure_manager,
             wal_options_allocator,
+            components,
             _guard: guard,
         })
     }

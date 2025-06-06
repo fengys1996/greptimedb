@@ -33,8 +33,8 @@ use common_telemetry::info;
 use common_telemetry::logging::TracingOptions;
 use common_version::{short_version, version};
 use flow::{
-    get_flow_auth_options, FlownodeBuilder, FlownodeInstance, FlownodeServiceBuilder,
-    FrontendClient, FrontendInvoker,
+    get_flow_auth_options, FlownodeBuilder, FlownodeInstance, FrontendClient, FrontendInvoker,
+    ServerHandleMut,
 };
 use meta_client::{MetaClientOptions, MetaClientType};
 use snafu::{ensure, OptionExt, ResultExt};
@@ -49,20 +49,31 @@ use crate::{log_versions, App};
 
 pub const APP_NAME: &str = "greptime-flownode";
 
-type FlownodeOptions = GreptimeOptions<flow::FlownodeOptions>;
+pub type FlownodeOptions = GreptimeOptions<flow::FlownodeOptions>;
 
 pub struct Instance {
     flownode: FlownodeInstance,
+
+    pub components: Components,
 
     // Keep the logging guard to prevent the worker from being dropped.
     _guard: Vec<WorkerGuard>,
 }
 
+pub struct Components {
+    pub frontend: Arc<FrontendClient>,
+}
+
 impl Instance {
-    pub fn new(flownode: FlownodeInstance, guard: Vec<WorkerGuard>) -> Self {
+    pub fn new(
+        flownode: FlownodeInstance,
+        guard: Vec<WorkerGuard>,
+        frontend: Arc<FrontendClient>,
+    ) -> Self {
         Self {
             flownode,
             _guard: guard,
+            components: Components { frontend },
         }
     }
 
@@ -73,6 +84,10 @@ impl Instance {
     /// allow customizing flownode for downstream projects
     pub fn flownode_mut(&mut self) -> &mut FlownodeInstance {
         &mut self.flownode
+    }
+
+    pub fn server_handle_mut(&self) -> &ServerHandleMut {
+        self.flownode.server_handle_mut()
     }
 }
 
@@ -336,24 +351,18 @@ impl StartCommand {
         let flow_auth_header = get_flow_auth_options(&opts).context(StartFlownodeSnafu)?;
         let frontend_client =
             FrontendClient::from_meta_client(meta_client.clone(), flow_auth_header);
+        let frontend_client = Arc::new(frontend_client);
         let flownode_builder = FlownodeBuilder::new(
             opts.clone(),
             plugins,
             table_metadata_manager,
             catalog_manager.clone(),
             flow_metadata_manager,
-            Arc::new(frontend_client),
+            frontend_client.clone(),
         )
         .with_heartbeat_task(heartbeat_task);
 
-        let mut flownode = flownode_builder.build().await.context(StartFlownodeSnafu)?;
-        let services = FlownodeServiceBuilder::new(&opts)
-            .with_grpc_server(flownode.flownode_server().clone())
-            .enable_http_service()
-            .build()
-            .context(StartFlownodeSnafu)?;
-        flownode.setup_services(services);
-        let flownode = flownode;
+        let flownode = flownode_builder.build().await.context(StartFlownodeSnafu)?;
 
         // flownode's frontend to datanode need not timeout.
         // Some queries are expected to take long time.
@@ -380,6 +389,6 @@ impl StartCommand {
             .set_frontend_invoker(invoker)
             .await;
 
-        Ok(Instance::new(flownode, guard))
+        Ok(Instance::new(flownode, guard, frontend_client))
     }
 }
