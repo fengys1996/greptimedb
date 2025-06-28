@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_config::Configurable;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -21,3 +22,8 @@ pub struct DummyOptions;
 pub enum PluginOptions {
     Dummy(DummyOptions),
 }
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct NoopOptions {}
+
+impl Configurable for NoopOptions {}

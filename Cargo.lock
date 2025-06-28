@@ -9190,6 +9190,7 @@ dependencies = [
  "clap 4.5.19",
  "cli",
  "common-base",
+ "common-config",
  "common-error",
  "datanode",
  "flow",

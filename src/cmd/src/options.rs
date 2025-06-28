@@ -49,7 +49,29 @@ pub struct GreptimeOptions<T> {
     pub component: T,
 }
 
+// TODO(LFC): Move logging and tracing options into global options, like the runtime options.
+/// All the options of GreptimeDB.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct GreptimeOptionsWithPlugin<P, T> {
+    /// The runtime options.
+    pub runtime: RuntimeOptions,
+
+    #[serde(flatten)]
+    pub plugins: P,
+
+    /// The options of each component (like Datanode or Standalone) of GreptimeDB.
+    #[serde(flatten)]
+    pub component: T,
+}
+
 impl<T: Configurable> Configurable for GreptimeOptions<T> {
+    fn env_list_keys() -> Option<&'static [&'static str]> {
+        T::env_list_keys()
+    }
+}
+
+impl<P: Configurable, T: Configurable> Configurable for GreptimeOptionsWithPlugin<P, T> {
     fn env_list_keys() -> Option<&'static [&'static str]> {
         T::env_list_keys()
     }

@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::Debug;
+use std::marker::PhantomData;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -45,14 +47,14 @@ use crate::error::{
     BuildCacheRegistrySnafu, InitMetadataSnafu, LoadLayeredConfigSnafu, MetaClientInitSnafu,
     MissingConfigSnafu, Result, ShutdownFlownodeSnafu, StartFlownodeSnafu,
 };
-use crate::options::{GlobalOptions, GreptimeOptions};
+use crate::options::{GlobalOptions, GreptimeOptionsWithPlugin};
 use crate::{create_resource_limit_metrics, log_versions, App};
 
 pub const APP_NAME: &str = "greptime-flownode";
 
-type FlownodeOptions = GreptimeOptions<flow::FlownodeOptions>;
+type FlownodeOptions<P> = GreptimeOptionsWithPlugin<P, flow::FlownodeOptions>;
 
-pub struct Instance {
+pub struct Instance<P> {
     flownode: FlownodeInstance,
 
     // The components of flownode, which make it easier to expand based
@@ -62,6 +64,8 @@ pub struct Instance {
 
     // Keep the logging guard to prevent the worker from being dropped.
     _guard: Vec<WorkerGuard>,
+
+    plugins_opts: PhantomData<P>,
 }
 
 #[cfg(feature = "enterprise")]
@@ -71,7 +75,7 @@ pub struct Components {
     pub kv_backend: common_meta::kv_backend::KvBackendRef,
 }
 
-impl Instance {
+impl<P> Instance<P> {
     pub fn new(
         flownode: FlownodeInstance,
         #[cfg(feature = "enterprise")] components: Components,
@@ -81,6 +85,7 @@ impl Instance {
             flownode,
             #[cfg(feature = "enterprise")]
             components,
+            plugins_opts: PhantomData,
             _guard: guard,
         }
     }
@@ -101,15 +106,18 @@ impl Instance {
 }
 
 #[async_trait::async_trait]
-impl App for Instance {
+impl<P> App for Instance<P>
+where
+    P: Send + Sync + 'static,
+{
     fn name(&self) -> &str {
         APP_NAME
     }
 
     async fn start(&mut self) -> Result<()> {
-        plugins::start_flownode_plugins(self.flownode.flow_engine().plugins().clone())
-            .await
-            .context(StartFlownodeSnafu)?;
+        // plugins::start_flownode_plugins(self.flownode.flow_engine().plugins().clone())
+        //     .await
+        //     .context(StartFlownodeSnafu)?;
 
         self.flownode.start().await.context(StartFlownodeSnafu)
     }
@@ -129,11 +137,14 @@ pub struct Command {
 }
 
 impl Command {
-    pub async fn build(&self, opts: FlownodeOptions) -> Result<Instance> {
+    pub async fn build<P: Debug>(&self, opts: FlownodeOptions<P>) -> Result<Instance<P>> {
         self.subcmd.build(opts).await
     }
 
-    pub fn load_options(&self, global_options: &GlobalOptions) -> Result<FlownodeOptions> {
+    pub fn load_options<P: Debug + Configurable>(
+        &self,
+        global_options: &GlobalOptions,
+    ) -> Result<FlownodeOptions<P>> {
         match &self.subcmd {
             SubCommand::Start(cmd) => cmd.load_options(global_options),
         }
@@ -146,9 +157,9 @@ enum SubCommand {
 }
 
 impl SubCommand {
-    async fn build(&self, opts: FlownodeOptions) -> Result<Instance> {
+    async fn build<P: Debug>(&self, opts: FlownodeOptions<P>) -> Result<Instance<P>> {
         match self {
-            SubCommand::Start(cmd) => cmd.build(opts).await,
+            SubCommand::Start(cmd) => cmd.build(opts, None).await,
         }
     }
 }
@@ -186,7 +197,10 @@ struct StartCommand {
 }
 
 impl StartCommand {
-    fn load_options(&self, global_options: &GlobalOptions) -> Result<FlownodeOptions> {
+    fn load_options<P: Configurable>(
+        &self,
+        global_options: &GlobalOptions,
+    ) -> Result<FlownodeOptions<P>> {
         let mut opts = FlownodeOptions::load_layered_options(
             self.config_file.as_deref(),
             self.env_prefix.as_ref(),
@@ -199,10 +213,10 @@ impl StartCommand {
     }
 
     // The precedence order is: cli > config file > environment variables > default values.
-    fn merge_with_cli_options(
+    fn merge_with_cli_options<P>(
         &self,
         global_options: &GlobalOptions,
-        opts: &mut FlownodeOptions,
+        opts: &mut FlownodeOptions<P>,
     ) -> Result<()> {
         let opts = &mut opts.component;
 
@@ -268,8 +282,13 @@ impl StartCommand {
         Ok(())
     }
 
-    async fn build(&self, opts: FlownodeOptions) -> Result<Instance> {
+    async fn build<P: Debug>(
+        &self,
+        opts: FlownodeOptions<P>,
+        plugins: Option<Plugins>,
+    ) -> Result<Instance<P>> {
         common_runtime::init_global_runtimes(&opts.runtime);
+        let plugins = plugins.unwrap_or_default();
 
         let guard = common_telemetry::init_global_logging(
             APP_NAME,
@@ -285,14 +304,9 @@ impl StartCommand {
         info!("Flownode start command: {:#?}", self);
         info!("Flownode options: {:#?}", opts);
 
-        let plugin_opts = opts.plugins;
+        // let plugin_opts = opts.plugins;
         let mut opts = opts.component;
         opts.grpc.detect_server_addr();
-
-        let mut plugins = Plugins::new();
-        plugins::setup_flownode_plugins(&mut plugins, &plugin_opts, &opts)
-            .await
-            .context(StartFlownodeSnafu)?;
 
         let member_id = opts
             .node_id

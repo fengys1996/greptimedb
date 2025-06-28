@@ -21,6 +21,7 @@ use cmd::options::GlobalOptions;
 use cmd::{cli, datanode, flownode, frontend, metasrv, standalone, App};
 use common_base::Plugins;
 use common_version::version;
+use plugins::NoopOptions;
 use servers::install_ring_crypto_provider;
 
 #[derive(Parser)]
@@ -104,16 +105,14 @@ async fn main_body() -> Result<()> {
 async fn start(cli: Command) -> Result<()> {
     match cli.subcmd {
         SubCommand::Datanode(cmd) => {
-            let opts = cmd.load_options(&cli.global_options)?;
+            let opts = cmd.load_options::<NoopOptions>(&cli.global_options)?;
             let plugins = Plugins::new();
             let builder = InstanceBuilder::try_new_with_init(opts, plugins).await?;
             cmd.build_with(builder).await?.run().await
         }
         SubCommand::Flownode(cmd) => {
-            cmd.build(cmd.load_options(&cli.global_options)?)
-                .await?
-                .run()
-                .await
+            let opts = cmd.load_options::<NoopOptions>(&cli.global_options)?;
+            cmd.build(opts).await?.run().await
         }
         SubCommand::Frontend(cmd) => {
             cmd.build(cmd.load_options(&cli.global_options)?)

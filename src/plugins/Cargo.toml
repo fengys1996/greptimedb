@@ -8,6 +8,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+common-config.workspace = true
 auth.workspace = true
 clap.workspace = true
 cli.workspace = true

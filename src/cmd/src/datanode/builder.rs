@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::Debug;
 use std::sync::Arc;
 
 use cache::build_datanode_cache_registry;
@@ -31,20 +32,20 @@ use crate::error::{MetaClientInitSnafu, MissingConfigSnafu, Result, StartDatanod
 use crate::{create_resource_limit_metrics, log_versions};
 
 /// Builder for Datanode instance.
-pub struct InstanceBuilder {
+pub struct InstanceBuilder<P> {
     guard: Vec<WorkerGuard>,
-    opts: DatanodeOptions,
+    opts: DatanodeOptions<P>,
     datanode_builder: DatanodeBuilder,
 }
 
-impl InstanceBuilder {
+impl<P: Debug> InstanceBuilder<P> {
     /// Try to create a new [InstanceBuilder], and do some initialization work like allocating
     /// runtime resources, setting up global logging and plugins, etc.
     pub async fn try_new_with_init(
-        mut opts: DatanodeOptions,
-        mut plugins: Plugins,
-    ) -> Result<Self> {
-        let guard = Self::init(&mut opts, &mut plugins).await?;
+        mut opts: DatanodeOptions<P>,
+        plugins: Plugins,
+    ) -> Result<InstanceBuilder<P>> {
+        let guard = Self::init(&mut opts).await?;
 
         let datanode_builder = Self::datanode_builder(&opts, plugins).await?;
 
@@ -55,7 +56,7 @@ impl InstanceBuilder {
         })
     }
 
-    async fn init(opts: &mut DatanodeOptions, plugins: &mut Plugins) -> Result<Vec<WorkerGuard>> {
+    async fn init(opts: &mut DatanodeOptions<P>) -> Result<Vec<WorkerGuard>> {
         common_runtime::init_global_runtimes(&opts.runtime);
 
         let dn_opts = &mut opts.component;
@@ -70,17 +71,13 @@ impl InstanceBuilder {
         log_versions(version(), short_version(), APP_NAME);
         create_resource_limit_metrics(APP_NAME);
 
-        plugins::setup_datanode_plugins(plugins, &opts.plugins, dn_opts)
-            .await
-            .context(StartDatanodeSnafu)?;
-
         dn_opts.grpc.detect_server_addr();
 
         info!("Initialized Datanode instance with {:#?}", opts);
         Ok(guard)
     }
 
-    async fn datanode_builder(opts: &DatanodeOptions, plugins: Plugins) -> Result<DatanodeBuilder> {
+    async fn datanode_builder(opts: &DatanodeOptions<P>, plugins: Plugins) -> Result<DatanodeBuilder> {
         let dn_opts = &opts.component;
 
         let member_id = dn_opts
@@ -121,7 +118,7 @@ impl InstanceBuilder {
     }
 
     /// Try to build the Datanode instance.
-    pub async fn build(self) -> Result<Instance> {
+    pub async fn build(self) -> Result<Instance<P>> {
         let mut datanode = self
             .datanode_builder
             .build()
