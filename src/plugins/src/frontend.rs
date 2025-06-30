@@ -18,12 +18,10 @@ use frontend::error::{IllegalAuthConfigSnafu, Result};
 use frontend::frontend::FrontendOptions;
 use snafu::ResultExt;
 
-use crate::options::PluginOptions;
-
 #[allow(unused_mut)]
-pub async fn setup_frontend_plugins(
+pub async fn setup_frontend_plugins<P>(
     plugins: &mut Plugins,
-    _plugin_options: &[PluginOptions],
+    _plugin_options: &P,
     fe_opts: &FrontendOptions,
 ) -> Result<()> {
     if let Some(user_provider) = fe_opts.user_provider.as_ref() {

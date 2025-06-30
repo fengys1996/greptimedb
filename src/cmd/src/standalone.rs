@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::Debug;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
@@ -94,14 +95,17 @@ pub struct Command {
 }
 
 impl Command {
-    pub async fn build(&self, opts: GreptimeOptions<StandaloneOptions>) -> Result<Instance> {
+    pub async fn build<P: Debug>(
+        &self,
+        opts: GreptimeOptions<StandaloneOptions, P>,
+    ) -> Result<Instance> {
         self.subcmd.build(opts).await
     }
 
-    pub fn load_options(
+    pub fn load_options<P: Configurable>(
         &self,
         global_options: &GlobalOptions,
-    ) -> Result<GreptimeOptions<StandaloneOptions>> {
+    ) -> Result<GreptimeOptions<StandaloneOptions, P>> {
         self.subcmd.load_options(global_options)
     }
 }
@@ -112,16 +116,19 @@ enum SubCommand {
 }
 
 impl SubCommand {
-    async fn build(&self, opts: GreptimeOptions<StandaloneOptions>) -> Result<Instance> {
+    async fn build<P: Debug>(
+        &self,
+        opts: GreptimeOptions<StandaloneOptions, P>,
+    ) -> Result<Instance> {
         match self {
             SubCommand::Start(cmd) => cmd.build(opts).await,
         }
     }
 
-    fn load_options(
+    fn load_options<P: Configurable>(
         &self,
         global_options: &GlobalOptions,
-    ) -> Result<GreptimeOptions<StandaloneOptions>> {
+    ) -> Result<GreptimeOptions<StandaloneOptions, P>> {
         match self {
             SubCommand::Start(cmd) => cmd.load_options(global_options),
         }
@@ -378,11 +385,11 @@ pub struct StartCommand {
 
 impl StartCommand {
     /// Load the GreptimeDB options from various sources (command line, config file or env).
-    pub fn load_options(
+    pub fn load_options<P: Configurable>(
         &self,
         global_options: &GlobalOptions,
-    ) -> Result<GreptimeOptions<StandaloneOptions>> {
-        let mut opts = GreptimeOptions::<StandaloneOptions>::load_layered_options(
+    ) -> Result<GreptimeOptions<StandaloneOptions, P>> {
+        let mut opts = GreptimeOptions::<StandaloneOptions, P>::load_layered_options(
             self.config_file.as_deref(),
             self.env_prefix.as_ref(),
         )
@@ -474,7 +481,10 @@ impl StartCommand {
     #[allow(unused_variables)]
     #[allow(clippy::diverging_sub_expression)]
     /// Build GreptimeDB instance with the loaded options.
-    pub async fn build(&self, opts: GreptimeOptions<StandaloneOptions>) -> Result<Instance> {
+    pub async fn build<P: Debug>(
+        &self,
+        opts: GreptimeOptions<StandaloneOptions, P>,
+    ) -> Result<Instance> {
         common_runtime::init_global_runtimes(&opts.runtime);
 
         let guard = common_telemetry::init_global_logging(
@@ -492,7 +502,7 @@ impl StartCommand {
         info!("Standalone options: {opts:#?}");
 
         let mut plugins = Plugins::new();
-        let plugin_opts = opts.plugins;
+        let plugin_opts = opts.plugin;
         let mut opts = opts.component;
         opts.grpc.detect_server_addr();
         let fe_opts = opts.frontend_options();
@@ -861,7 +871,7 @@ mod tests {
         };
 
         let mut plugins = Plugins::new();
-        plugins::setup_frontend_plugins(&mut plugins, &[], &fe_opts)
+        plugins::setup_frontend_plugins(&mut plugins, &(), &fe_opts)
             .await
             .unwrap();
 
@@ -940,7 +950,7 @@ mod tests {
         };
 
         let options = cmd
-            .load_options(&GlobalOptions::default())
+            .load_options::<()>(&GlobalOptions::default())
             .unwrap()
             .component;
         let fe_opts = options.frontend_options();
@@ -998,7 +1008,7 @@ mod tests {
         };
 
         let opts = cmd
-            .load_options(&GlobalOptions {
+            .load_options::<()>(&GlobalOptions {
                 log_dir: Some("./greptimedb_data/test/logs".to_string()),
                 log_level: Some("debug".to_string()),
 
@@ -1066,7 +1076,10 @@ mod tests {
                     ..Default::default()
                 };
 
-                let opts = command.load_options(&Default::default()).unwrap().component;
+                let opts = command
+                    .load_options::<()>(&Default::default())
+                    .unwrap()
+                    .component;
 
                 // Should be read from env, env > default values.
                 assert_eq!(opts.logging.dir, "/other/log/dir");

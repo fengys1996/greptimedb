@@ -25,6 +25,8 @@ pub const ENV_VAR_SEP: &str = "__";
 /// Separator for list values in environment variables. For example, `localhost:3001,localhost:3002,localhost:3003`.
 pub const ENV_LIST_SEP: &str = ",";
 
+impl Configurable for () {}
+
 /// Configuration trait defines the common interface for configuration that can be loaded from multiple sources and serialized to TOML.
 pub trait Configurable: Serialize + DeserializeOwned + Default + Sized {
     /// Load the configuration from multiple sources and merge them.

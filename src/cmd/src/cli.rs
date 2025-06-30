@@ -122,7 +122,9 @@ mod tests {
             &*output_dir.path().to_string_lossy(),
         ]);
 
-        let standalone_opts = standalone.load_options(&GlobalOptions::default()).unwrap();
+        let standalone_opts = standalone
+            .load_options::<()>(&GlobalOptions::default())
+            .unwrap();
         let mut instance = standalone.build(standalone_opts).await?;
         instance.start().await?;
 

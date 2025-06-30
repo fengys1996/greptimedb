@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::Debug;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -49,7 +50,7 @@ use crate::error::{self, Result};
 use crate::options::{GlobalOptions, GreptimeOptions};
 use crate::{create_resource_limit_metrics, log_versions, App};
 
-type FrontendOptions = GreptimeOptions<frontend::frontend::FrontendOptions>;
+type FrontendOptions<P> = GreptimeOptions<frontend::frontend::FrontendOptions, P>;
 
 pub struct Instance {
     frontend: Frontend,
@@ -106,11 +107,14 @@ pub struct Command {
 }
 
 impl Command {
-    pub async fn build(&self, opts: FrontendOptions) -> Result<Instance> {
+    pub async fn build<P: Debug>(&self, opts: FrontendOptions<P>) -> Result<Instance> {
         self.subcmd.build(opts).await
     }
 
-    pub fn load_options(&self, global_options: &GlobalOptions) -> Result<FrontendOptions> {
+    pub fn load_options<P: Configurable + Debug>(
+        &self,
+        global_options: &GlobalOptions,
+    ) -> Result<FrontendOptions<P>> {
         self.subcmd.load_options(global_options)
     }
 }
@@ -121,13 +125,16 @@ enum SubCommand {
 }
 
 impl SubCommand {
-    async fn build(&self, opts: FrontendOptions) -> Result<Instance> {
+    async fn build<P: Debug>(&self, opts: FrontendOptions<P>) -> Result<Instance> {
         match self {
             SubCommand::Start(cmd) => cmd.build(opts).await,
         }
     }
 
-    fn load_options(&self, global_options: &GlobalOptions) -> Result<FrontendOptions> {
+    fn load_options<P: Configurable + Debug>(
+        &self,
+        global_options: &GlobalOptions,
+    ) -> Result<FrontendOptions<P>> {
         match self {
             SubCommand::Start(cmd) => cmd.load_options(global_options),
         }
@@ -173,7 +180,10 @@ pub struct StartCommand {
 }
 
 impl StartCommand {
-    fn load_options(&self, global_options: &GlobalOptions) -> Result<FrontendOptions> {
+    fn load_options<P: Configurable + Debug>(
+        &self,
+        global_options: &GlobalOptions,
+    ) -> Result<FrontendOptions<P>> {
         let mut opts = FrontendOptions::load_layered_options(
             self.config_file.as_deref(),
             self.env_prefix.as_ref(),
@@ -186,10 +196,10 @@ impl StartCommand {
     }
 
     // The precedence order is: cli > config file > environment variables > default values.
-    fn merge_with_cli_options(
+    fn merge_with_cli_options<P>(
         &self,
         global_options: &GlobalOptions,
-        opts: &mut FrontendOptions,
+        opts: &mut FrontendOptions<P>,
     ) -> Result<()> {
         let opts = &mut opts.component;
 
@@ -271,7 +281,7 @@ impl StartCommand {
         Ok(())
     }
 
-    async fn build(&self, opts: FrontendOptions) -> Result<Instance> {
+    async fn build<P: Debug>(&self, opts: FrontendOptions<P>) -> Result<Instance> {
         common_runtime::init_global_runtimes(&opts.runtime);
 
         let guard = common_telemetry::init_global_logging(
@@ -288,7 +298,7 @@ impl StartCommand {
         info!("Frontend start command: {:#?}", self);
         info!("Frontend options: {:#?}", opts);
 
-        let plugin_opts = opts.plugins;
+        let plugin_opts = opts.plugin;
         let mut opts = opts.component;
         opts.grpc.detect_server_addr();
         let mut plugins = Plugins::new();
@@ -445,14 +455,17 @@ mod tests {
             ..Default::default()
         };
 
-        let opts = command.load_options(&Default::default()).unwrap().component;
+        let opts = command
+            .load_options::<()>(&Default::default())
+            .unwrap()
+            .component;
 
         assert_eq!(opts.http.addr, "127.0.0.1:1234");
         assert_eq!(ReadableSize::mb(64), opts.http.body_limit);
         assert_eq!(opts.mysql.addr, "127.0.0.1:5678");
         assert_eq!(opts.postgres.addr, "127.0.0.1:5432");
 
-        let default_opts = FrontendOptions::default().component;
+        let default_opts = FrontendOptions::<()>::default().component;
 
         assert_eq!(opts.grpc.bind_addr, default_opts.grpc.bind_addr);
         assert!(opts.mysql.enable);
@@ -491,7 +504,10 @@ mod tests {
             ..Default::default()
         };
 
-        let fe_opts = command.load_options(&Default::default()).unwrap().component;
+        let fe_opts = command
+            .load_options::<()>(&Default::default())
+            .unwrap()
+            .component;
 
         assert_eq!("127.0.0.1:4000".to_string(), fe_opts.http.addr);
         assert_eq!(Duration::from_secs(0), fe_opts.http.timeout);
@@ -518,7 +534,7 @@ mod tests {
         };
 
         let mut plugins = Plugins::new();
-        plugins::setup_frontend_plugins(&mut plugins, &[], &fe_opts)
+        plugins::setup_frontend_plugins::<()>(&mut plugins, &(), &fe_opts)
             .await
             .unwrap();
 
@@ -540,7 +556,7 @@ mod tests {
         };
 
         let options = cmd
-            .load_options(&GlobalOptions {
+            .load_options::<()>(&GlobalOptions {
                 log_dir: Some("./greptimedb_data/test/logs".to_string()),
                 log_level: Some("debug".to_string()),
 
@@ -624,7 +640,10 @@ mod tests {
                     ..Default::default()
                 };
 
-                let fe_opts = command.load_options(&Default::default()).unwrap().component;
+                let fe_opts = command
+                    .load_options::<()>(&Default::default())
+                    .unwrap()
+                    .component;
 
                 // Should be read from env, env > default values.
                 assert_eq!(fe_opts.mysql.runtime_size, 11);

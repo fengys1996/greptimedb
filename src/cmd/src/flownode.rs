@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::Debug;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -50,7 +51,7 @@ use crate::{create_resource_limit_metrics, log_versions, App};
 
 pub const APP_NAME: &str = "greptime-flownode";
 
-type FlownodeOptions = GreptimeOptions<flow::FlownodeOptions>;
+type FlownodeOptions<P> = GreptimeOptions<flow::FlownodeOptions, P>;
 
 pub struct Instance {
     flownode: FlownodeInstance,
@@ -129,11 +130,14 @@ pub struct Command {
 }
 
 impl Command {
-    pub async fn build(&self, opts: FlownodeOptions) -> Result<Instance> {
+    pub async fn build<P: Debug>(&self, opts: FlownodeOptions<P>) -> Result<Instance> {
         self.subcmd.build(opts).await
     }
 
-    pub fn load_options(&self, global_options: &GlobalOptions) -> Result<FlownodeOptions> {
+    pub fn load_options<P: Configurable>(
+        &self,
+        global_options: &GlobalOptions,
+    ) -> Result<FlownodeOptions<P>> {
         match &self.subcmd {
             SubCommand::Start(cmd) => cmd.load_options(global_options),
         }
@@ -146,7 +150,7 @@ enum SubCommand {
 }
 
 impl SubCommand {
-    async fn build(&self, opts: FlownodeOptions) -> Result<Instance> {
+    async fn build<P: Debug>(&self, opts: FlownodeOptions<P>) -> Result<Instance> {
         match self {
             SubCommand::Start(cmd) => cmd.build(opts).await,
         }
@@ -186,7 +190,10 @@ struct StartCommand {
 }
 
 impl StartCommand {
-    fn load_options(&self, global_options: &GlobalOptions) -> Result<FlownodeOptions> {
+    fn load_options<P: Configurable>(
+        &self,
+        global_options: &GlobalOptions,
+    ) -> Result<FlownodeOptions<P>> {
         let mut opts = FlownodeOptions::load_layered_options(
             self.config_file.as_deref(),
             self.env_prefix.as_ref(),
@@ -199,10 +206,10 @@ impl StartCommand {
     }
 
     // The precedence order is: cli > config file > environment variables > default values.
-    fn merge_with_cli_options(
+    fn merge_with_cli_options<P>(
         &self,
         global_options: &GlobalOptions,
-        opts: &mut FlownodeOptions,
+        opts: &mut FlownodeOptions<P>,
     ) -> Result<()> {
         let opts = &mut opts.component;
 
@@ -268,7 +275,7 @@ impl StartCommand {
         Ok(())
     }
 
-    async fn build(&self, opts: FlownodeOptions) -> Result<Instance> {
+    async fn build<P: Debug>(&self, opts: FlownodeOptions<P>) -> Result<Instance> {
         common_runtime::init_global_runtimes(&opts.runtime);
 
         let guard = common_telemetry::init_global_logging(
@@ -285,7 +292,7 @@ impl StartCommand {
         info!("Flownode start command: {:#?}", self);
         info!("Flownode options: {:#?}", opts);
 
-        let plugin_opts = opts.plugins;
+        let plugin_opts = opts.plugin;
         let mut opts = opts.component;
         opts.grpc.detect_server_addr();
 

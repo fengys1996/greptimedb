@@ -104,31 +104,31 @@ async fn main_body() -> Result<()> {
 async fn start(cli: Command) -> Result<()> {
     match cli.subcmd {
         SubCommand::Datanode(cmd) => {
-            let opts = cmd.load_options(&cli.global_options)?;
+            let opts = cmd.load_options::<()>(&cli.global_options)?;
             let plugins = Plugins::new();
             let builder = InstanceBuilder::try_new_with_init(opts, plugins).await?;
             cmd.build_with(builder).await?.run().await
         }
         SubCommand::Flownode(cmd) => {
-            cmd.build(cmd.load_options(&cli.global_options)?)
+            cmd.build(cmd.load_options::<()>(&cli.global_options)?)
                 .await?
                 .run()
                 .await
         }
         SubCommand::Frontend(cmd) => {
-            cmd.build(cmd.load_options(&cli.global_options)?)
+            cmd.build(cmd.load_options::<()>(&cli.global_options)?)
                 .await?
                 .run()
                 .await
         }
         SubCommand::Metasrv(cmd) => {
-            cmd.build(cmd.load_options(&cli.global_options)?)
+            cmd.build(cmd.load_options::<()>(&cli.global_options)?)
                 .await?
                 .run()
                 .await
         }
         SubCommand::Standalone(cmd) => {
-            cmd.build(cmd.load_options(&cli.global_options)?)
+            cmd.build(cmd.load_options::<()>(&cli.global_options)?)
                 .await?
                 .run()
                 .await

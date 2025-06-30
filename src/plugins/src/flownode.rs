@@ -16,12 +16,10 @@ use common_base::Plugins;
 use flow::error::Result;
 use flow::FlownodeOptions;
 
-use crate::options::PluginOptions;
-
 #[allow(unused_mut)]
-pub async fn setup_flownode_plugins(
+pub async fn setup_flownode_plugins<P>(
     _plugins: &mut Plugins,
-    _plugin_options: &[PluginOptions],
+    _plugin_options: &P,
     _fn_opts: &FlownodeOptions,
 ) -> Result<()> {
     Ok(())

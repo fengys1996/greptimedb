@@ -41,10 +41,10 @@ use store_api::path_utils::WAL_DIR;
 fn test_load_datanode_example_config() {
     let example_config = common_test_util::find_workspace_path("config/datanode.example.toml");
     let options =
-        GreptimeOptions::<DatanodeOptions>::load_layered_options(example_config.to_str(), "")
+        GreptimeOptions::<DatanodeOptions, ()>::load_layered_options(example_config.to_str(), "")
             .unwrap();
 
-    let expected = GreptimeOptions::<DatanodeOptions> {
+    let expected = GreptimeOptions::<DatanodeOptions, ()> {
         component: DatanodeOptions {
             node_id: Some(42),
             meta_client: Some(MetaClientOptions {
@@ -107,9 +107,9 @@ fn test_load_datanode_example_config() {
 fn test_load_frontend_example_config() {
     let example_config = common_test_util::find_workspace_path("config/frontend.example.toml");
     let options =
-        GreptimeOptions::<FrontendOptions>::load_layered_options(example_config.to_str(), "")
+        GreptimeOptions::<FrontendOptions, ()>::load_layered_options(example_config.to_str(), "")
             .unwrap();
-    let expected = GreptimeOptions::<FrontendOptions> {
+    let expected = GreptimeOptions::<FrontendOptions, ()> {
         component: FrontendOptions {
             default_timezone: Some("UTC".to_string()),
             meta_client: Some(MetaClientOptions {
@@ -160,9 +160,9 @@ fn test_load_frontend_example_config() {
 fn test_load_metasrv_example_config() {
     let example_config = common_test_util::find_workspace_path("config/metasrv.example.toml");
     let options =
-        GreptimeOptions::<MetasrvOptions>::load_layered_options(example_config.to_str(), "")
+        GreptimeOptions::<MetasrvOptions, ()>::load_layered_options(example_config.to_str(), "")
             .unwrap();
-    let expected = GreptimeOptions::<MetasrvOptions> {
+    let expected = GreptimeOptions::<MetasrvOptions, ()> {
         component: MetasrvOptions {
             selector: SelectorType::default(),
             data_home: DEFAULT_DATA_HOME.to_string(),
@@ -201,9 +201,9 @@ fn test_load_metasrv_example_config() {
 fn test_load_flownode_example_config() {
     let example_config = common_test_util::find_workspace_path("config/flownode.example.toml");
     let options =
-        GreptimeOptions::<FlownodeOptions>::load_layered_options(example_config.to_str(), "")
+        GreptimeOptions::<FlownodeOptions, ()>::load_layered_options(example_config.to_str(), "")
             .unwrap();
-    let expected = GreptimeOptions::<FlownodeOptions> {
+    let expected = GreptimeOptions::<FlownodeOptions, ()> {
         component: FlownodeOptions {
             node_id: Some(14),
             flow: Default::default(),
@@ -252,9 +252,9 @@ fn test_load_flownode_example_config() {
 fn test_load_standalone_example_config() {
     let example_config = common_test_util::find_workspace_path("config/standalone.example.toml");
     let options =
-        GreptimeOptions::<StandaloneOptions>::load_layered_options(example_config.to_str(), "")
+        GreptimeOptions::<StandaloneOptions, ()>::load_layered_options(example_config.to_str(), "")
             .unwrap();
-    let expected = GreptimeOptions::<StandaloneOptions> {
+    let expected = GreptimeOptions::<StandaloneOptions, ()> {
         component: StandaloneOptions {
             default_timezone: Some("UTC".to_string()),
             wal: DatanodeWalConfig::RaftEngine(RaftEngineConfig {
