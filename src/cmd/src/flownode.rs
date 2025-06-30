@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::fmt::Debug;
-use std::marker::PhantomData;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -54,7 +53,7 @@ pub const APP_NAME: &str = "greptime-flownode";
 
 type FlownodeOptions<P> = GreptimeOptionsWithPlugin<P, flow::FlownodeOptions>;
 
-pub struct Instance<P> {
+pub struct Instance {
     flownode: FlownodeInstance,
 
     // The components of flownode, which make it easier to expand based
@@ -64,8 +63,6 @@ pub struct Instance<P> {
 
     // Keep the logging guard to prevent the worker from being dropped.
     _guard: Vec<WorkerGuard>,
-
-    plugins_opts: PhantomData<P>,
 }
 
 #[cfg(feature = "enterprise")]
@@ -75,7 +72,7 @@ pub struct Components {
     pub kv_backend: common_meta::kv_backend::KvBackendRef,
 }
 
-impl<P> Instance<P> {
+impl Instance {
     pub fn new(
         flownode: FlownodeInstance,
         #[cfg(feature = "enterprise")] components: Components,
@@ -85,7 +82,6 @@ impl<P> Instance<P> {
             flownode,
             #[cfg(feature = "enterprise")]
             components,
-            plugins_opts: PhantomData,
             _guard: guard,
         }
     }
@@ -106,10 +102,7 @@ impl<P> Instance<P> {
 }
 
 #[async_trait::async_trait]
-impl<P> App for Instance<P>
-where
-    P: Send + Sync + 'static,
-{
+impl App for Instance {
     fn name(&self) -> &str {
         APP_NAME
     }
@@ -137,7 +130,7 @@ pub struct Command {
 }
 
 impl Command {
-    pub async fn build<P: Debug>(&self, opts: FlownodeOptions<P>) -> Result<Instance<P>> {
+    pub async fn build<P: Debug>(&self, opts: FlownodeOptions<P>) -> Result<Instance> {
         self.subcmd.build(opts).await
     }
 
@@ -157,7 +150,7 @@ enum SubCommand {
 }
 
 impl SubCommand {
-    async fn build<P: Debug>(&self, opts: FlownodeOptions<P>) -> Result<Instance<P>> {
+    async fn build<P: Debug>(&self, opts: FlownodeOptions<P>) -> Result<Instance> {
         match self {
             SubCommand::Start(cmd) => cmd.build(opts, None).await,
         }
@@ -286,7 +279,7 @@ impl StartCommand {
         &self,
         opts: FlownodeOptions<P>,
         plugins: Option<Plugins>,
-    ) -> Result<Instance<P>> {
+    ) -> Result<Instance> {
         common_runtime::init_global_runtimes(&opts.runtime);
         let plugins = plugins.unwrap_or_default();
 

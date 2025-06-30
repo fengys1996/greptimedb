@@ -77,7 +77,10 @@ impl<P: Debug> InstanceBuilder<P> {
         Ok(guard)
     }
 
-    async fn datanode_builder(opts: &DatanodeOptions<P>, plugins: Plugins) -> Result<DatanodeBuilder> {
+    async fn datanode_builder(
+        opts: &DatanodeOptions<P>,
+        plugins: Plugins,
+    ) -> Result<DatanodeBuilder> {
         let dn_opts = &opts.component;
 
         let member_id = dn_opts
