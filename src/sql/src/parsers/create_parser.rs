@@ -16,6 +16,7 @@
 pub mod trigger;
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use common_catalog::consts::default_engine;
 use datafusion_common::ScalarValue;
@@ -363,6 +364,25 @@ impl<'a> ParserContext<'a> {
                                                                            // this is to keep the same as https://docs.rs/humantime/latest/humantime/fn.parse_duration.html
                                                                            // which we use in database to parse i.e. ttl interval and many other intervals
             )
+        } else {
+            unreachable!()
+        }
+    }
+
+    fn parse_interval_to_duration(&mut self) -> Result<Duration> {
+        let interval_expr = self.parser.parse_expr().context(error::SyntaxSnafu)?;
+        let interval = utils::parser_expr_to_scalar_value_literal(interval_expr.clone())?
+            .cast_to(&ArrowDataType::Interval(IntervalUnit::MonthDayNano))
+            .ok()
+            .with_context(|| InvalidIntervalSnafu {
+                reason: format!("cannot cast {} to interval type", interval_expr),
+            })?;
+        if let ScalarValue::IntervalMonthDayNano(Some(interval)) = interval {
+            let secs = (interval.days as i64 * 60 * 60 * 24
+                + interval.months as i64 * 60 * 60 * 24 * 3044 / 1000)
+                as u64;
+            let nanoseconds = interval.nanoseconds as u32;
+            Ok(Duration::new(secs, nanoseconds))
         } else {
             unreachable!()
         }

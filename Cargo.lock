@@ -2544,6 +2544,7 @@ dependencies = [
  "object-store",
  "prometheus",
  "prost 0.13.5",
+ "prost-types 0.13.5",
  "rand 0.9.0",
  "regex",
  "rskafka",
@@ -5229,9 +5230,10 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=fe8c13f5f3c1fbef63f57fbdd29f0490dfeb987b#fe8c13f5f3c1fbef63f57fbdd29f0490dfeb987b"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=651175480b10ff7d99c201444134c87fc2b5f566#651175480b10ff7d99c201444134c87fc2b5f566"
 dependencies = [
  "prost 0.13.5",
+ "prost-types 0.13.5",
  "serde",
  "serde_json",
  "strum 0.25.0",

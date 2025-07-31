@@ -19,6 +19,7 @@ use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use common_wal::options::WalOptions;
+use prost_types::DurationError;
 use serde_json::error::Error as JsonError;
 use snafu::{Location, Snafu};
 use store_api::storage::RegionId;
@@ -931,6 +932,28 @@ pub enum Error {
         table_name: String,
         table_id: TableId,
     },
+
+    #[snafu(display("Too large duration"))]
+    TooLargeDuration {
+        #[snafu(source)]
+        error: DurationError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Negative duration"))]
+    NegativeDuration {
+        #[snafu(source)]
+        error: DurationError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Missing interval"))]
+    MissingInterval {
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -995,6 +1018,7 @@ impl ErrorExt for Error {
             | KafkaGetOffset { .. }
             | ReadFlexbuffers { .. }
             | SerializeFlexbuffers { .. }
+            | MissingInterval { .. }
             | DeserializeFlexbuffers { .. } => StatusCode::Unexpected,
 
             SendMessage { .. } | GetKvCache { .. } | CacheNotGet { .. } => StatusCode::Internal,
@@ -1015,8 +1039,10 @@ impl ErrorExt for Error {
             | InvalidTimeZone { .. }
             | InvalidFileExtension { .. }
             | InvalidFileName { .. }
-            | InvalidFilePath { .. } => StatusCode::InvalidArguments,
-            InvalidFlowRequestBody { .. } => StatusCode::InvalidArguments,
+            | InvalidFilePath { .. }
+            | TooLargeDuration { .. }
+            | NegativeDuration { .. }
+            | InvalidFlowRequestBody { .. } => StatusCode::InvalidArguments,
 
             FlowNotFound { .. } => StatusCode::FlowNotFound,
             FlowRouteNotFound { .. } => StatusCode::Unexpected,

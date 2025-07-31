@@ -1,7 +1,7 @@
 use std::fmt::{Display, Formatter};
 
 use serde::Serialize;
-use sqlparser::ast::{ObjectName, Query};
+use sqlparser::ast::{Interval, ObjectName, Query};
 use sqlparser_derive::{Visit, VisitMut};
 
 use crate::statements::create::trigger::NotifyChannel;
@@ -17,8 +17,7 @@ pub struct AlterTrigger {
 pub struct AlterTriggerOperation {
     pub rename: Option<String>,
     pub new_query: Option<Box<Query>>,
-    /// The new interval of exec query. Unit is second.
-    pub new_interval: Option<u64>,
+    pub new_interval: Option<Interval>,
     pub label_operations: Option<LabelOperations>,
     pub annotation_operations: Option<AnnotationOperations>,
     pub notify_channel_operations: Option<NotifyChannelOperations>,
@@ -36,7 +35,7 @@ impl Display for AlterTrigger {
         }
 
         if let Some((new_query, new_interval)) =
-            operation.new_query.as_ref().zip(operation.new_interval)
+            operation.new_query.as_ref().zip(operation.new_interval.clone())
         {
             writeln!(f)?;
             write!(f, "ON {}", new_query)?;

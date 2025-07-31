@@ -2,7 +2,7 @@ use std::fmt::{Display, Formatter};
 
 use itertools::Itertools;
 use serde::Serialize;
-use sqlparser::ast::Query;
+use sqlparser::ast::{Interval, Query};
 use sqlparser_derive::{Visit, VisitMut};
 
 use crate::ast::{Ident, ObjectName};
@@ -16,7 +16,7 @@ pub struct CreateTrigger {
     /// SQL statement executed periodically.
     pub query: Box<Query>,
     /// The interval of exec query. Unit is second.
-    pub interval: u64,
+    pub interval: Interval,
     pub labels: OptionMap,
     pub annotations: OptionMap,
     pub channels: Vec<NotifyChannel>,
@@ -30,7 +30,7 @@ impl Display for CreateTrigger {
         }
         writeln!(f, "{}", self.trigger_name)?;
         write!(f, "ON {} ", self.query)?;
-        writeln!(f, "EVERY {} SECONDS", self.interval)?;
+        writeln!(f, "EVERY {}", self.interval)?;
 
         if !self.labels.is_empty() {
             let labels = self.labels.kv_pairs();

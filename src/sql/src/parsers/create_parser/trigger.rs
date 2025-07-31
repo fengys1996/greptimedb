@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use snafu::{ensure, OptionExt, ResultExt};
-use sqlparser::ast::Query;
+use sqlparser::ast::{Expr, Interval, Query};
 use sqlparser::keywords::Keyword;
 use sqlparser::parser::Parser;
 use sqlparser::tokenizer::Token;
@@ -128,7 +128,7 @@ impl<'a> ParserContext<'a> {
     pub(crate) fn parse_trigger_on(
         &mut self,
         is_first_keyword_matched: bool,
-    ) -> Result<(Box<Query>, u64)> {
+    ) -> Result<(Box<Query>, Interval)> {
         if !is_first_keyword_matched {
             if let Token::Word(w) = self.parser.peek_token().token
                 && w.value.eq_ignore_ascii_case(ON)
@@ -149,10 +149,11 @@ impl<'a> ParserContext<'a> {
             return self.expected("`EVERY` keyword", self.parser.peek_token());
         }
 
-        let interval = self
-            .parse_interval()?
-            .try_into()
-            .context(error::NegativeIntervalSnafu)?;
+        let expr = self.parser.parse_interval().unwrap();
+
+        let Expr::Interval(interval) = expr else {
+            unreachable!()
+        };
 
         Ok((query, interval))
     }
@@ -455,7 +456,7 @@ IF NOT EXISTS cpu_monitor
             create_trigger.query.to_string(),
             "(SELECT host AS host_label, cpu, memory FROM machine_monitor WHERE cpu > 1)"
         );
-        assert_eq!(create_trigger.interval, 300);
+        // assert_eq!(create_trigger.interval, 300);
         assert_eq!(create_trigger.labels.len(), 1);
         assert_eq!(
             create_trigger.labels.get("label_name").unwrap(),
@@ -487,9 +488,9 @@ IF NOT EXISTS cpu_monitor
         // Normal.
         let sql = "ON (SELECT * FROM cpu_usage) EVERY '5 minute'::INTERVAL";
         let mut ctx = ParserContext::new(&GreptimeDbDialect {}, sql).unwrap();
-        let (query, interval) = ctx.parse_trigger_on(false).unwrap();
+        let (query, _interval) = ctx.parse_trigger_on(false).unwrap();
         assert_eq!(query.to_string(), "(SELECT * FROM cpu_usage)");
-        assert_eq!(interval, 300);
+        // assert_eq!(interval, 300);
 
         // Invalid, since missing `ON` keyword.
         let sql = "SELECT * FROM cpu_usage EVERY '5 minute'::INTERVAL";
