@@ -86,11 +86,11 @@ impl From<VersionRef> for CompactionVersion {
 pub struct CompactionRegion {
     pub region_id: RegionId,
     pub region_options: RegionOptions,
+    pub access_layer: AccessLayerRef,
 
     pub(crate) engine_config: Arc<MitoConfig>,
     pub(crate) region_metadata: RegionMetadataRef,
     pub(crate) cache_manager: CacheManagerRef,
-    pub(crate) access_layer: AccessLayerRef,
     pub(crate) manifest_ctx: Arc<ManifestContext>,
     pub(crate) current_version: CompactionVersion,
     pub(crate) file_purger: Option<Arc<LocalFilePurger>>,
