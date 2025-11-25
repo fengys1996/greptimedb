@@ -1,0 +1,21 @@
+[package]
+name = "plugins-framework"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+enterprise = ["common-meta/enterprise", "operator/enterprise"]
+
+[dependencies]
+async-trait.workspace = true
+catalog.workspace = true
+common-error.workspace = true
+common-meta.workspace = true
+flow.workspace = true
+meta-client.workspace = true
+operator.workspace = true
+servers.workspace = true
+
+[lints]
+workspace = true

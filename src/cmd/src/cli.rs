@@ -106,9 +106,9 @@ mod tests {
     use client::{Client, Database};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_telemetry::logging::LoggingOptions;
+    use plugins_framework::standalone::DefaultStandalonePluginFactory;
 
     use crate::error::Result as CmdResult;
-    use crate::extension::standalone::DefaultExtensionFactory as StandaloneExtensionFactory;
     use crate::options::{EmptyOptions, GlobalOptions};
     use crate::{App, cli, standalone};
 
@@ -127,7 +127,7 @@ mod tests {
             .load_options::<EmptyOptions>(&GlobalOptions::default())
             .unwrap();
         let mut instance = standalone
-            .build(standalone_opts, StandaloneExtensionFactory)
+            .build(standalone_opts, DefaultStandalonePluginFactory)
             .await?;
         instance.start().await?;
 

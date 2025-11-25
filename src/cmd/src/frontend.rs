@@ -43,6 +43,7 @@ use frontend::heartbeat::HeartbeatTask;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::server::Services;
 use meta_client::{MetaClientOptions, MetaClientType};
+use plugins_framework::frontend::{FrontendPluginContext, FrontendPluginFactory};
 use servers::addrs;
 use servers::grpc::GrpcOptions;
 use servers::tls::{TlsMode, TlsOption};
@@ -50,7 +51,6 @@ use snafu::{OptionExt, ResultExt};
 use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::{self, OtherSnafu, Result};
-use crate::extension::frontend::{ExtensionContext, ExtensionFactory};
 use crate::options::{GlobalOptions, GreptimeOptions};
 use crate::{App, create_resource_limit_metrics, log_versions, maybe_activate_heap_profile};
 
@@ -111,7 +111,7 @@ pub struct Command {
 }
 
 impl Command {
-    pub async fn build<E: Debug, F: ExtensionFactory>(
+    pub async fn build<E: Debug, F: FrontendPluginFactory>(
         &self,
         opts: FrontendOptions<E>,
         extension_factory: F,
@@ -133,7 +133,7 @@ pub enum SubCommand {
 }
 
 impl SubCommand {
-    async fn build<E: Debug, F: ExtensionFactory>(
+    async fn build<E: Debug, F: FrontendPluginFactory>(
         &self,
         opts: FrontendOptions<E>,
         extension_factory: F,
@@ -329,7 +329,7 @@ impl StartCommand {
         Ok(())
     }
 
-    async fn build<E: Debug, F: ExtensionFactory>(
+    async fn build<E: Debug, F: FrontendPluginFactory>(
         &self,
         opts: FrontendOptions<E>,
         extension_factory: F,
@@ -434,7 +434,7 @@ impl StartCommand {
         ));
 
         let extension = extension_factory
-            .create(ExtensionContext {
+            .create(FrontendPluginContext {
                 kv_backend: cached_meta_backend.clone(),
                 meta_client: meta_client.clone(),
             })

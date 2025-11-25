@@ -23,31 +23,31 @@ use operator::statement::TriggerQuerierRef;
 
 /// The extension point for frontend instance.
 #[derive(Default)]
-pub struct Extension {
+pub struct FrontendPlugins {
     pub info_schema_factories: Option<HashMap<String, InformationSchemaTableFactoryRef>>,
     #[cfg(feature = "enterprise")]
     pub trigger_querier: Option<TriggerQuerierRef>,
 }
 
-/// Factory trait to create Extension instances.
-pub trait ExtensionFactory: Send + Sync {
+/// The factory trait to create [`FrontendPlugins`].
+pub trait FrontendPluginFactory {
     fn create(
         &self,
-        ctx: ExtensionContext,
-    ) -> impl Future<Output = Result<Extension, BoxedError>> + Send;
+        ctx: FrontendPluginContext,
+    ) -> impl Future<Output = Result<FrontendPlugins, BoxedError>> + Send;
 }
 
-/// Context provided to ExtensionFactory during extension creation.
-pub struct ExtensionContext {
+/// Context provided to [`FrontendPluginFactory`] during plugin creation.
+pub struct FrontendPluginContext {
     pub kv_backend: KvBackendRef,
     pub meta_client: MetaClientRef,
 }
 
-/// Default no-op implementation of ExtensionFactory.
-pub struct DefaultExtensionFactory;
+/// Default no-op implementation of [`FrontendPluginFactory`].
+pub struct DefaultFrontendPluginFactory;
 
-impl ExtensionFactory for DefaultExtensionFactory {
-    async fn create(&self, _: ExtensionContext) -> Result<Extension, BoxedError> {
-        Ok(Extension::default())
+impl FrontendPluginFactory for DefaultFrontendPluginFactory {
+    async fn create(&self, _: FrontendPluginContext) -> Result<FrontendPlugins, BoxedError> {
+        Ok(FrontendPlugins::default())
     }
 }

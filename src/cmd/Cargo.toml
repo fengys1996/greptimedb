@@ -72,6 +72,7 @@ object-store.workspace = true
 operator.workspace = true
 parquet = { workspace = true, features = ["object_store"] }
 plugins.workspace = true
+plugins-framework.workspace = true
 prometheus.workspace = true
 prost.workspace = true
 query.workspace = true

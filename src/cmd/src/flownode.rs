@@ -40,6 +40,7 @@ use flow::{
     get_flow_auth_options,
 };
 use meta_client::{MetaClientOptions, MetaClientType};
+use plugins_framework::flownode::{FlownodePluginContext, FlownodePluginFactory};
 use snafu::{OptionExt, ResultExt, ensure};
 use tracing_appender::non_blocking::WorkerGuard;
 
@@ -47,7 +48,6 @@ use crate::error::{
     BuildCacheRegistrySnafu, InitMetadataSnafu, LoadLayeredConfigSnafu, MetaClientInitSnafu,
     MissingConfigSnafu, OtherSnafu, Result, ShutdownFlownodeSnafu, StartFlownodeSnafu,
 };
-use crate::extension::flownode::{ExtensionContext, ExtensionFactory};
 use crate::options::{GlobalOptions, GreptimeOptions};
 use crate::{App, create_resource_limit_metrics, log_versions, maybe_activate_heap_profile};
 
@@ -108,7 +108,7 @@ pub struct Command {
 }
 
 impl Command {
-    pub async fn build<E: Debug, F: ExtensionFactory>(
+    pub async fn build<E: Debug, F: FlownodePluginFactory>(
         &self,
         opts: FlownodeOptions<E>,
         extension_factory: F,
@@ -132,7 +132,7 @@ enum SubCommand {
 }
 
 impl SubCommand {
-    async fn build<E: Debug, F: ExtensionFactory>(
+    async fn build<E: Debug, F: FlownodePluginFactory>(
         &self,
         opts: FlownodeOptions<E>,
         extension_factory: F,
@@ -261,7 +261,7 @@ impl StartCommand {
         Ok(())
     }
 
-    async fn build<E: Debug, F: ExtensionFactory>(
+    async fn build<E: Debug, F: FlownodePluginFactory>(
         &self,
         opts: FlownodeOptions<E>,
         extension_factory: F,
@@ -402,7 +402,7 @@ impl StartCommand {
 
         let mut flownode = flownode_builder.build().await.context(StartFlownodeSnafu)?;
 
-        let context = ExtensionContext {
+        let context = FlownodePluginContext {
             kv_backend: cached_meta_backend.clone(),
             fe_client: frontend_client.clone(),
             flownode_id: member_id,

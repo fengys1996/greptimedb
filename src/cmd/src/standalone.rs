@@ -58,6 +58,9 @@ use frontend::instance::StandaloneDatanodeManager;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::server::Services;
 use meta_srv::metasrv::{FLOW_ID_SEQ, TABLE_ID_SEQ};
+use plugins_framework::standalone::{
+    InfoTableFactoryContext, StandalonePluginContext, StandalonePluginFactory,
+};
 use servers::tls::{TlsMode, TlsOption};
 use snafu::ResultExt;
 use standalone::StandaloneInformationExtension;
@@ -65,7 +68,6 @@ use standalone::options::StandaloneOptions;
 use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::{OtherSnafu, Result, StartFlownodeSnafu};
-use crate::extension::standalone::{ExtensionContext, ExtensionFactory, InfoTableFactoryContext};
 use crate::options::{GlobalOptions, GreptimeOptions};
 use crate::{App, create_resource_limit_metrics, error, log_versions, maybe_activate_heap_profile};
 
@@ -78,7 +80,7 @@ pub struct Command {
 }
 
 impl Command {
-    pub async fn build<E: Debug, F: ExtensionFactory>(
+    pub async fn build<E: Debug, F: StandalonePluginFactory>(
         &self,
         opts: GreptimeOptions<StandaloneOptions, E>,
         extension_factory: F,
@@ -100,7 +102,7 @@ enum SubCommand {
 }
 
 impl SubCommand {
-    async fn build<E: Debug, F: ExtensionFactory>(
+    async fn build<E: Debug, F: StandalonePluginFactory>(
         &self,
         opts: GreptimeOptions<StandaloneOptions, E>,
         extension_factory: F,
@@ -328,7 +330,7 @@ impl StartCommand {
     #[allow(unused_variables)]
     #[allow(clippy::diverging_sub_expression)]
     /// Build GreptimeDB instance with the loaded options.
-    pub async fn build<E: Debug, F: ExtensionFactory>(
+    pub async fn build<E: Debug, F: StandalonePluginFactory>(
         &self,
         opts: GreptimeOptions<StandaloneOptions, E>,
         extension_factory: F,
@@ -498,7 +500,7 @@ impl StartCommand {
             flow_id_sequence,
         ));
 
-        let context = ExtensionContext {
+        let context = StandalonePluginContext {
             kv_backend: kv_backend.clone(),
             catalog_manager: catalog_manager.clone(),
             frontend_client: frontend_client.clone(),

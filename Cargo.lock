@@ -1941,6 +1941,7 @@ dependencies = [
  "operator",
  "parquet",
  "plugins",
+ "plugins-framework",
  "pprof",
  "prometheus",
  "prost 0.13.5",
@@ -9508,6 +9509,20 @@ dependencies = [
  "serde",
  "snafu 0.8.6",
  "standalone",
+]
+
+[[package]]
+name = "plugins-framework"
+version = "1.0.0-beta.2"
+dependencies = [
+ "async-trait",
+ "catalog",
+ "common-error",
+ "common-meta",
+ "flow",
+ "meta-client",
+ "operator",
+ "servers",
 ]
 
 [[package]]

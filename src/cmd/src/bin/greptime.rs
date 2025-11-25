@@ -17,14 +17,14 @@
 use clap::{Parser, Subcommand};
 use cmd::datanode::builder::InstanceBuilder;
 use cmd::error::{InitTlsProviderSnafu, Result};
-use cmd::extension::flownode::DefaultExtensionFactory as FlowExtensionFactory;
-use cmd::extension::frontend::DefaultExtensionFactory as FrontendExtensionFactory;
-use cmd::extension::standalone::DefaultExtensionFactory as StandaloneExtensionFactory;
 use cmd::options::{EmptyOptions, GlobalOptions};
 use cmd::{App, cli, datanode, flownode, frontend, metasrv, standalone};
 use common_base::Plugins;
 use common_version::{verbose_version, version};
 use meta_srv::bootstrap::extension::DefaultExtensionFactory as MetaExtensionFactory;
+use plugins_framework::flownode::DefaultFlownodePluginFactory;
+use plugins_framework::frontend::DefaultFrontendPluginFactory;
+use plugins_framework::standalone::DefaultStandalonePluginFactory;
 use servers::install_ring_crypto_provider;
 
 #[derive(Parser)]
@@ -118,11 +118,17 @@ async fn start(cli: Command) -> Result<()> {
         },
         SubCommand::Flownode(cmd) => {
             let opts = cmd.load_options::<EmptyOptions>(&cli.global_options)?;
-            cmd.build(opts, FlowExtensionFactory).await?.run().await
+            cmd.build(opts, DefaultFlownodePluginFactory)
+                .await?
+                .run()
+                .await
         }
         SubCommand::Frontend(cmd) => {
             let opts = cmd.load_options::<EmptyOptions>(&cli.global_options)?;
-            cmd.build(opts, FrontendExtensionFactory).await?.run().await
+            cmd.build(opts, DefaultFrontendPluginFactory)
+                .await?
+                .run()
+                .await
         }
         SubCommand::Metasrv(cmd) => {
             let opts = cmd.load_options::<EmptyOptions>(&cli.global_options)?;
@@ -130,7 +136,7 @@ async fn start(cli: Command) -> Result<()> {
         }
         SubCommand::Standalone(cmd) => {
             let opts = cmd.load_options::<EmptyOptions>(&cli.global_options)?;
-            cmd.build(opts, StandaloneExtensionFactory)
+            cmd.build(opts, DefaultStandalonePluginFactory)
                 .await?
                 .run()
                 .await

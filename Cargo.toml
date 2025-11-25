@@ -58,6 +58,7 @@ members = [
     "src/partition",
     "src/pipeline",
     "src/plugins",
+    "src/plugins-framework",
     "src/promql",
     "src/puffin",
     "src/query",
@@ -300,6 +301,7 @@ operator = { path = "src/operator" }
 partition = { path = "src/partition" }
 pipeline = { path = "src/pipeline" }
 plugins = { path = "src/plugins" }
+plugins-framework = { path = "src/plugins-framework" }
 promql = { path = "src/promql" }
 puffin = { path = "src/puffin" }
 query = { path = "src/query" }

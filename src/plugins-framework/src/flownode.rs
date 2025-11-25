@@ -20,35 +20,35 @@ use common_meta::FlownodeId;
 use common_meta::kv_backend::KvBackendRef;
 use flow::FrontendClient;
 
-use crate::extension::common::GrpcExtensionRef;
+use crate::common::GrpcExtensionRef;
 
 /// The extension point for flownode instance.
 #[derive(Default)]
-pub struct Extension {
+pub struct FlownodePlugins {
     pub grpc: Option<GrpcExtensionRef>,
 }
 
-/// Factory trait to create Extension instances.
-pub trait ExtensionFactory: Send + Sync {
+/// The factory trait to create [`FlownodePlugins`].
+pub trait FlownodePluginFactory {
     fn create(
         &self,
-        ctx: ExtensionContext,
-    ) -> impl Future<Output = Result<Extension, BoxedError>> + Send;
+        ctx: FlownodePluginContext,
+    ) -> impl Future<Output = Result<FlownodePlugins, BoxedError>> + Send;
 }
 
-/// Context provided to ExtensionFactory during extension creation.
-pub struct ExtensionContext {
+/// Context provided to [`FlownodePluginFactory`] during plugin creation.
+pub struct FlownodePluginContext {
     pub kv_backend: KvBackendRef,
     pub fe_client: Arc<FrontendClient>,
     pub flownode_id: FlownodeId,
     pub catalog_manager: CatalogManagerRef,
 }
 
-/// Default no-op implementation of ExtensionFactory.
-pub struct DefaultExtensionFactory;
+/// Default no-op implementation of [`FlownodePluginFactory`].
+pub struct DefaultFlownodePluginFactory;
 
-impl ExtensionFactory for DefaultExtensionFactory {
-    async fn create(&self, _: ExtensionContext) -> Result<Extension, BoxedError> {
-        Ok(Extension::default())
+impl FlownodePluginFactory for DefaultFlownodePluginFactory {
+    async fn create(&self, _: FlownodePluginContext) -> Result<FlownodePlugins, BoxedError> {
+        Ok(FlownodePlugins::default())
     }
 }

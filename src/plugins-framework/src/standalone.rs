@@ -27,22 +27,23 @@ use operator::statement::TriggerQuerierRef;
 
 /// The extension point for standalone instance.
 #[derive(Default)]
-pub struct Extension {
+pub struct StandalonePlugins {
     #[cfg(feature = "enterprise")]
     pub trigger_ddl_manager: Option<TriggerDdlManagerRef>,
     #[cfg(feature = "enterprise")]
     pub trigger_querier: Option<TriggerQuerierRef>,
 }
 
-/// Factory trait to create Extension instance.
-pub trait ExtensionFactory: InformationSchemaTableFactories + Send + Sync {
+/// The factory trait to create [`StandalonePlugins`].
+pub trait StandalonePluginFactory: InformationSchemaTableFactories {
     fn create(
         &self,
-        ctx: ExtensionContext,
-    ) -> impl Future<Output = Result<Extension, BoxedError>> + Send;
+        ctx: StandalonePluginContext,
+    ) -> impl Future<Output = Result<StandalonePlugins, BoxedError>> + Send;
 }
 
-pub struct ExtensionContext {
+/// Context provided to [`StandalonePluginFactory`] during plugin creation.
+pub struct StandalonePluginContext {
     pub kv_backend: KvBackendRef,
     pub catalog_manager: CatalogManagerRef,
     pub frontend_client: Arc<FrontendClient>,
@@ -55,8 +56,8 @@ pub struct ExtensionContext {
 /// - `information_schema.triggers`
 /// - `information_schema.alerts`
 ///
-/// It is separated from the [`ExtensionFactory`] to avoid circular dependencies,
-/// since the [`CatalogManagerRef`] of [`ExtensionContext`] is dependent on the
+/// It is separated from the [`StandalonePluginFactory`] to avoid circular dependencies,
+/// since the [`CatalogManagerRef`] of [`StandalonePluginContext`] is dependent on the
 /// [`InformationSchemaTableFactories`].
 #[async_trait::async_trait]
 pub trait InformationSchemaTableFactories: Send + Sync {
@@ -68,26 +69,26 @@ pub trait InformationSchemaTableFactories: Send + Sync {
 
 pub type InformationSchemaTableFactoriesRef = Arc<dyn InformationSchemaTableFactories>;
 
-/// Context for information schema table factory providers.
+/// Context for [`InformationSchemaTableFactories`].
 pub struct InfoTableFactoryContext {
     pub fe_client: Arc<FrontendClient>,
 }
 
-/// Default no-op implementation of ExtensionFactory.
-pub struct DefaultExtensionFactory;
+/// Default no-op implementation of [`StandalonePluginFactory`].
+pub struct DefaultStandalonePluginFactory;
 
 #[async_trait::async_trait]
-impl InformationSchemaTableFactories for DefaultExtensionFactory {
+impl InformationSchemaTableFactories for DefaultStandalonePluginFactory {
     async fn create_factories(
         &self,
-        _ctx: InfoTableFactoryContext,
+        _: InfoTableFactoryContext,
     ) -> Result<HashMap<String, InformationSchemaTableFactoryRef>, BoxedError> {
         Ok(HashMap::new())
     }
 }
 
-impl ExtensionFactory for DefaultExtensionFactory {
-    async fn create(&self, _ctx: ExtensionContext) -> Result<Extension, BoxedError> {
-        Ok(Extension::default())
+impl StandalonePluginFactory for DefaultStandalonePluginFactory {
+    async fn create(&self, _: StandalonePluginContext) -> Result<StandalonePlugins, BoxedError> {
+        Ok(StandalonePlugins::default())
     }
 }
