@@ -32,6 +32,15 @@ pub enum ObjectStoreConfig {
     Oss(OssConfig),
     Azblob(AzblobConfig),
     Gcs(GcsConfig),
+    Ob(ObConfig),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(default)]
+pub struct ObConfig {
+    pub name: String,
+    #[serde(flatten)]
+    pub cache: ObjectStorageCacheConfig,
 }
 
 impl Default for ObjectStoreConfig {
@@ -49,6 +58,7 @@ impl ObjectStoreConfig {
             Self::Oss(_) => "Oss",
             Self::Azblob(_) => "Azblob",
             Self::Gcs(_) => "Gcs",
+            Self::Ob(_) => "Ob",
         }
     }
 
@@ -66,6 +76,7 @@ impl ObjectStoreConfig {
             Self::Oss(oss) => &oss.name,
             Self::Azblob(az) => &az.name,
             Self::Gcs(gcs) => &gcs.name,
+            Self::Ob(ob) => &ob.name,
         };
 
         if name.trim().is_empty() {
@@ -83,6 +94,7 @@ impl ObjectStoreConfig {
             Self::Oss(oss) => Some(&oss.cache),
             Self::Azblob(az) => Some(&az.cache),
             Self::Gcs(gcs) => Some(&gcs.cache),
+            Self::Ob(ob) => Some(&ob.cache),
         }
     }
 
@@ -94,6 +106,7 @@ impl ObjectStoreConfig {
             Self::Oss(oss) => Some(&mut oss.cache),
             Self::Azblob(az) => Some(&mut az.cache),
             Self::Gcs(gcs) => Some(&mut gcs.cache),
+            Self::Ob(ob) => Some(&mut ob.cache),
         }
     }
 }

@@ -19,7 +19,7 @@ use opendal::layers::HttpClientLayer;
 use opendal::services::{Fs, Gcs, Oss, S3};
 use snafu::prelude::*;
 
-use crate::config::{AzblobConfig, FileConfig, GcsConfig, ObjectStoreConfig, OssConfig, S3Config};
+use crate::config::{AzblobConfig, FileConfig, GcsConfig, ObConfig, ObjectStoreConfig, OssConfig, S3Config};
 use crate::error::{self, Result};
 use crate::services::Azblob;
 use crate::util::{build_http_client, clean_temp_dir, join_dir, normalize_dir};
@@ -36,7 +36,12 @@ pub async fn new_raw_object_store(
         ObjectStoreConfig::Oss(oss_config) => new_oss_object_store(oss_config).await,
         ObjectStoreConfig::Azblob(azblob_config) => new_azblob_object_store(azblob_config).await,
         ObjectStoreConfig::Gcs(gcs_config) => new_gcs_object_store(gcs_config).await,
+        ObjectStoreConfig::Ob(ob_config) => new_ob_store(ob_config).await,
     }
+}
+
+pub async fn new_ob_store(_ob_config: &ObConfig) -> Result<ObjectStore> {
+    todo!()
 }
 
 /// A helper function to create a file system object store.
