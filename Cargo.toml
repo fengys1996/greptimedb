@@ -167,7 +167,7 @@ nalgebra = "0.33"
 nix = { version = "0.30.1", default-features = false, features = ["event", "fs", "process"] }
 notify = "8.0"
 num_cpus = "1.16"
-object_store_opendal = "0.54"
+object_store_opendal = { git = "https://github.com/apache/opendal.git", rev = "38e624161ca7dd00b571b2a7d6afbb9ec6aa771f" }
 once_cell = "1.18"
 opentelemetry-proto = { version = "0.30", features = [
     "gen-tonic",
