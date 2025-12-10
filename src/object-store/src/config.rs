@@ -18,6 +18,7 @@ use common_base::readable_size::ReadableSize;
 use common_base::secrets::{ExposeSecret, SecretString};
 use opendal::services::{Azblob, Gcs, Oss, S3};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::util;
 
@@ -32,6 +33,36 @@ pub enum ObjectStoreConfig {
     Oss(OssConfig),
     Azblob(AzblobConfig),
     Gcs(GcsConfig),
+    /// Enterprise or custom providers register their own builder at runtime.
+    Extension(ExtensionConfig),
+}
+
+/// Config for custom enterprise object store providers. The actual implementation
+/// should be registered at runtime via `register_extension_object_store_builder`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ExtensionConfig {
+    /// Optional human readable name for this configuration entry.
+    pub name: String,
+    /// Provider identifier understood by the enterprise implementation.
+    pub provider: String,
+    /// Free-form options passed directly to the registered builder.
+    pub options: Value,
+    #[serde(flatten)]
+    pub cache: ObjectStorageCacheConfig,
+    pub http_client: HttpClientConfig,
+}
+
+impl Default for ExtensionConfig {
+    fn default() -> Self {
+        Self {
+            name: String::default(),
+            provider: String::default(),
+            options: Value::Object(Default::default()),
+            cache: ObjectStorageCacheConfig::default(),
+            http_client: HttpClientConfig::default(),
+        }
+    }
 }
 
 impl Default for ObjectStoreConfig {
@@ -42,13 +73,14 @@ impl Default for ObjectStoreConfig {
 
 impl ObjectStoreConfig {
     /// Returns the object storage type name, such as `S3`, `Oss` etc.
-    pub fn provider_name(&self) -> &'static str {
+    pub fn provider_name(&self) -> &str {
         match self {
             Self::File(_) => "File",
             Self::S3(_) => "S3",
             Self::Oss(_) => "Oss",
             Self::Azblob(_) => "Azblob",
             Self::Gcs(_) => "Gcs",
+            Self::Extension(ext) => &ext.provider,
         }
     }
 
@@ -66,6 +98,7 @@ impl ObjectStoreConfig {
             Self::Oss(oss) => &oss.name,
             Self::Azblob(az) => &az.name,
             Self::Gcs(gcs) => &gcs.name,
+            Self::Extension(ext) => &ext.name,
         };
 
         if name.trim().is_empty() {
@@ -83,6 +116,7 @@ impl ObjectStoreConfig {
             Self::Oss(oss) => Some(&oss.cache),
             Self::Azblob(az) => Some(&az.cache),
             Self::Gcs(gcs) => Some(&gcs.cache),
+            Self::Extension(ext) => Some(&ext.cache),
         }
     }
 
@@ -94,6 +128,7 @@ impl ObjectStoreConfig {
             Self::Oss(oss) => Some(&mut oss.cache),
             Self::Azblob(az) => Some(&mut az.cache),
             Self::Gcs(gcs) => Some(&mut gcs.cache),
+            Self::Extension(ext) => Some(&mut ext.cache),
         }
     }
 }
@@ -267,6 +302,7 @@ impl From<&GcsConnection> for Gcs {
             .endpoint(&connection.endpoint)
     }
 }
+
 /// The http client options to the storage.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
@@ -355,6 +391,13 @@ mod tests {
         });
         assert_eq!("test", s3_config.config_name());
         assert_eq!("S3", s3_config.provider_name());
+
+        let extension_config = ObjectStoreConfig::Extension(ExtensionConfig {
+            provider: "Enterprise".to_string(),
+            ..Default::default()
+        });
+        assert_eq!("Enterprise", extension_config.config_name());
+        assert_eq!("Enterprise", extension_config.provider_name());
     }
 
     #[test]
@@ -369,5 +412,10 @@ mod tests {
         assert!(gcs_config.is_object_storage());
         let azblob_config = ObjectStoreConfig::Azblob(AzblobConfig::default());
         assert!(azblob_config.is_object_storage());
+        let extension_config = ObjectStoreConfig::Extension(ExtensionConfig {
+            provider: "Enterprise".to_string(),
+            ..Default::default()
+        });
+        assert!(extension_config.is_object_storage());
     }
 }

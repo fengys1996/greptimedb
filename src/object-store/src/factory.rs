@@ -12,18 +12,41 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{fs, path};
+use std::{fs, path, sync::OnceLock};
 
+use futures::future::BoxFuture;
 use common_telemetry::info;
 use opendal::layers::HttpClientLayer;
 use opendal::services::{Fs, Gcs, Oss, S3};
 use snafu::prelude::*;
 
-use crate::config::{AzblobConfig, FileConfig, GcsConfig, ObjectStoreConfig, OssConfig, S3Config};
+use crate::config::{
+    AzblobConfig, ExtensionConfig, FileConfig, GcsConfig, ObjectStoreConfig, OssConfig, S3Config,
+};
 use crate::error::{self, Result};
 use crate::services::Azblob;
 use crate::util::{build_http_client, clean_temp_dir, join_dir, normalize_dir};
 use crate::{ATOMIC_WRITE_DIR, OLD_ATOMIC_WRITE_DIR, ObjectStore, util};
+
+type ExtensionObjectStoreBuilder =
+    dyn Fn(ExtensionConfig) -> BoxFuture<'static, Result<ObjectStore>> + Send + Sync;
+
+static EXTENSION_OBJECT_STORE_BUILDER: OnceLock<Box<ExtensionObjectStoreBuilder>> =
+    OnceLock::new();
+
+/// Registers a custom object store builder that handles `ObjectStoreConfig::Extension`.
+/// Returns `true` if the builder is installed successfully, or `false` if a builder
+/// has already been set.
+pub fn register_extension_object_store_builder(
+    builder: impl Fn(ExtensionConfig) -> BoxFuture<'static, Result<ObjectStore>>
+        + Send
+        + Sync
+        + 'static,
+) -> bool {
+    EXTENSION_OBJECT_STORE_BUILDER
+        .set(Box::new(builder))
+        .is_ok()
+}
 
 pub async fn new_raw_object_store(
     store: &ObjectStoreConfig,
@@ -36,6 +59,7 @@ pub async fn new_raw_object_store(
         ObjectStoreConfig::Oss(oss_config) => new_oss_object_store(oss_config).await,
         ObjectStoreConfig::Azblob(azblob_config) => new_azblob_object_store(azblob_config).await,
         ObjectStoreConfig::Gcs(gcs_config) => new_gcs_object_store(gcs_config).await,
+        ObjectStoreConfig::Extension(ext_config) => new_extension_object_store(ext_config).await,
     }
 }
 
@@ -129,4 +153,13 @@ pub async fn new_s3_object_store(s3_config: &S3Config) -> Result<ObjectStore> {
         .finish();
 
     Ok(operator)
+}
+
+pub async fn new_extension_object_store(ext_config: &ExtensionConfig) -> Result<ObjectStore> {
+    let builder = EXTENSION_OBJECT_STORE_BUILDER
+        .get()
+        .context(error::ExtensionBackendNotRegisteredSnafu {
+            provider: ext_config.provider.clone(),
+        })?;
+    builder(ext_config.clone()).await
 }

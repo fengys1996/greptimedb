@@ -27,7 +27,8 @@ mod metrics;
 pub mod test_util;
 pub mod util;
 
-pub use config::{AzblobConnection, GcsConnection, OssConnection, S3Connection};
+pub use config::{AzblobConnection, ExtensionConfig, GcsConnection, OssConnection, S3Connection};
+pub use factory::register_extension_object_store_builder;
 
 /// The default object cache directory name.
 pub const OBJECT_CACHE_DIR: &str = "object_cache";

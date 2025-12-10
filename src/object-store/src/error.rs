@@ -52,6 +52,13 @@ pub enum Error {
         #[snafu(source)]
         error: std::io::Error,
     },
+
+    #[snafu(display("Extension object store builder for provider `{provider}` is not registered"))]
+    ExtensionBackendNotRegistered {
+        provider: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -61,7 +68,7 @@ impl ErrorExt for Error {
         use Error::*;
         match self {
             InitBackend { .. } => StatusCode::StorageUnavailable,
-            BuildHttpClient { .. } => StatusCode::Unexpected,
+            BuildHttpClient { .. } | ExtensionBackendNotRegistered { .. } => StatusCode::Unexpected,
             CreateDir { .. } | RemoveDir { .. } => StatusCode::Internal,
         }
     }
