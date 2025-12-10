@@ -39,6 +39,9 @@ pub enum ObjectStoreConfig {
 #[serde(default)]
 pub struct ObConfig {
     pub name: String,
+    pub root: String,
+    pub addr: String,
+    pub table: Option<String>,
     #[serde(flatten)]
     pub cache: ObjectStorageCacheConfig,
 }

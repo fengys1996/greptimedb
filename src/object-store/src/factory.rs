@@ -16,10 +16,12 @@ use std::{fs, path};
 
 use common_telemetry::info;
 use opendal::layers::HttpClientLayer;
-use opendal::services::{Fs, Gcs, Oss, S3};
+use opendal::services::{Fs, Gcs, Mysql, Oss, S3};
 use snafu::prelude::*;
 
-use crate::config::{AzblobConfig, FileConfig, GcsConfig, ObConfig, ObjectStoreConfig, OssConfig, S3Config};
+use crate::config::{
+    AzblobConfig, FileConfig, GcsConfig, ObConfig, ObjectStoreConfig, OssConfig, S3Config,
+};
 use crate::error::{self, Result};
 use crate::services::Azblob;
 use crate::util::{build_http_client, clean_temp_dir, join_dir, normalize_dir};
@@ -40,8 +42,29 @@ pub async fn new_raw_object_store(
     }
 }
 
-pub async fn new_ob_store(_ob_config: &ObConfig) -> Result<ObjectStore> {
-    todo!()
+pub async fn new_ob_store(ob_config: &ObConfig) -> Result<ObjectStore> {
+    let ObConfig {
+        root,
+        addr,
+        table,
+        cache: _,
+        name: _,
+    } = ob_config;
+
+    let builder = Mysql::default()
+        .connection_string(addr)
+        .root(root)
+        .key_field("key")
+        .value_field("value");
+    let builder = if let Some(table) = table.as_ref() {
+        builder.table(table)
+    } else {
+        builder.table("greptime")
+    };
+
+    Ok(ObjectStore::new(builder)
+        .context(error::InitBackendSnafu)?
+        .finish())
 }
 
 /// A helper function to create a file system object store.

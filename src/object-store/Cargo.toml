@@ -32,6 +32,7 @@ opendal = { version = "0.54", features = [
     "services-http",
     "services-oss",
     "services-s3",
+    "services-mysql",
 ] }
 prometheus.workspace = true
 reqwest.workspace = true
