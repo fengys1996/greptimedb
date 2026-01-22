@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashSet;
+use std::fs;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
@@ -371,12 +372,10 @@ impl ServerMode {
                 mysql_addr,
                 postgres_addr,
             } => {
+                let log_dir = sqlness_home.join(format!("greptimedb-{}-standalone/logs", id));
+                Self::ensure_log_dir(log_dir.as_path());
                 args.extend([
-                    format!(
-                        "--log-dir={}/greptimedb-{}-standalone/logs",
-                        sqlness_home.display(),
-                        id
-                    ),
+                    format!("--log-dir={}", log_dir.display()),
                     "-c".to_string(),
                     self.generate_config_file(sqlness_home, db_ctx, id),
                     format!("--http-addr={http_addr}"),
@@ -392,6 +391,8 @@ impl ServerMode {
                 postgres_addr,
                 metasrv_addr,
             } => {
+                let log_dir = sqlness_home.join(format!("greptimedb-{}-frontend/logs", id));
+                Self::ensure_log_dir(log_dir.as_path());
                 args.extend([
                     format!("--metasrv-addrs={metasrv_addr}"),
                     format!("--http-addr={http_addr}"),
@@ -401,11 +402,7 @@ impl ServerMode {
                     format!("--rpc-server-addr={rpc_bind_addr}"),
                     format!("--mysql-addr={mysql_addr}"),
                     format!("--postgres-addr={postgres_addr}"),
-                    format!(
-                        "--log-dir={}/greptimedb-{}-frontend/logs",
-                        sqlness_home.display(),
-                        id
-                    ),
+                    format!("--log-dir={}", log_dir.display()),
                     "-c".to_string(),
                     self.generate_config_file(sqlness_home, db_ctx, id),
                 ]);
@@ -415,6 +412,8 @@ impl ServerMode {
                 rpc_server_addr,
                 http_addr,
             } => {
+                let log_dir = sqlness_home.join(format!("greptimedb-{}-metasrv/logs", id));
+                Self::ensure_log_dir(log_dir.as_path());
                 args.extend([
                     "--bind-addr".to_string(),
                     rpc_bind_addr.clone(),
@@ -423,11 +422,7 @@ impl ServerMode {
                     "--enable-region-failover".to_string(),
                     "false".to_string(),
                     format!("--http-addr={http_addr}"),
-                    format!(
-                        "--log-dir={}/greptimedb-{}-metasrv/logs",
-                        sqlness_home.display(),
-                        id
-                    ),
+                    format!("--log-dir={}", log_dir.display()),
                     "-c".to_string(),
                     self.generate_config_file(sqlness_home, db_ctx, id),
                 ]);
@@ -500,12 +495,14 @@ impl ServerMode {
                     id,
                     db_ctx.time()
                 ));
+                let log_dir = data_home.join("logs");
+                Self::ensure_log_dir(log_dir.as_path());
                 args.extend([
                     format!("--rpc-addr={rpc_bind_addr}"),
                     format!("--rpc-server-addr={rpc_server_addr}"),
                     format!("--http-addr={http_addr}"),
                     format!("--data-home={}", data_home.display()),
-                    format!("--log-dir={}/logs", data_home.display()),
+                    format!("--log-dir={}", log_dir.display()),
                     format!("--node-id={node_id}"),
                     "-c".to_string(),
                     self.generate_config_file(sqlness_home, db_ctx, id),
@@ -519,15 +516,13 @@ impl ServerMode {
                 metasrv_addr,
                 node_id,
             } => {
+                let log_dir = sqlness_home.join(format!("greptimedb-{}-flownode/logs", id));
+                Self::ensure_log_dir(log_dir.as_path());
                 args.extend([
                     format!("--rpc-addr={rpc_bind_addr}"),
                     format!("--rpc-server-addr={rpc_server_addr}"),
                     format!("--node-id={node_id}"),
-                    format!(
-                        "--log-dir={}/greptimedb-{}-flownode/logs",
-                        sqlness_home.display(),
-                        id
-                    ),
+                    format!("--log-dir={}", log_dir.display()),
                     format!("--metasrv-addrs={metasrv_addr}"),
                     format!("--http-addr={http_addr}"),
                 ]);
@@ -535,5 +530,11 @@ impl ServerMode {
         }
 
         args
+    }
+
+    fn ensure_log_dir(path: &Path) {
+        if let Err(e) = fs::create_dir_all(path) {
+            panic!("Failed to create log directory {}: {}", path.display(), e);
+        }
     }
 }
