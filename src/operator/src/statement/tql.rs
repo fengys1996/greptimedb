@@ -53,10 +53,13 @@ impl StatementExecutor {
 
                 let promql = PromQuery {
                     query: explain.query,
+                    start: explain.start,
+                    end: explain.end,
+                    step: explain.step,
                     lookback: explain
                         .lookback
                         .unwrap_or_else(|| DEFAULT_LOOKBACK_STRING.to_string()),
-                    ..PromQuery::default()
+                    alias: explain.alias,
                 };
                 let explain_node_name = if explain.is_verbose {
                     EXPLAIN_VERBOSE_NODE_NAME
