@@ -215,9 +215,42 @@ impl PromPlanner {
             .prom_expr_to_plan(&stmt.expr, query_engine_state)
             .await?;
 
-        // Apply alias if provided
+        // Apply alias if provided. For EXPLAIN/ANALYZE, apply alias to the inner plan
+        // before wrapping, so the plan text reflects the alias (like SQL).
         let plan = if let Some(alias_name) = alias {
-            planner.apply_alias_projection(plan, alias_name)?
+            match plan {
+                LogicalPlan::Explain(inner) => {
+                    let field_names = inner.plan.schema().field_names();
+                    assert!(field_names.len() == 1);
+                    let project = field_names.into_iter().map(|field_name| {
+                        DfExpr::Column(Column::from_name(field_name)).alias(&alias_name)
+                    });
+                    let plan = LogicalPlanBuilder::from(inner.plan.clone())
+                        .project(project)
+                        .unwrap()
+                        .explain(inner.verbose, false)
+                        .unwrap()
+                        .build()
+                        .unwrap();
+                    plan
+                }
+                LogicalPlan::Analyze(inner) => {
+                    let field_names = inner.input.schema().field_names();
+                    assert!(field_names.len() == 1);
+                    let project = field_names.into_iter().map(|field_name| {
+                        DfExpr::Column(Column::from_name(field_name)).alias(&alias_name)
+                    });
+                    let plan = LogicalPlanBuilder::from(inner.input.clone())
+                        .project(project)
+                        .unwrap()
+                        .explain(inner.verbose, false)
+                        .unwrap()
+                        .build()
+                        .unwrap();
+                    plan
+                }
+                _ => planner.apply_alias_projection(plan, alias_name)?,
+            }
         } else {
             plan
         };
@@ -4018,12 +4051,14 @@ mod test {
     use datatypes::schema::{ColumnSchema, Schema};
     use promql_parser::label::Labels;
     use promql_parser::parser;
+    use promql_parser::parser::Expr as PromExpr;
     use session::context::QueryContext;
     use table::metadata::{TableInfoBuilder, TableMetaBuilder};
     use table::test_util::EmptyTable;
 
     use super::*;
     use crate::options::QueryOptions;
+    use crate::parser::{AnalyzeVerboseExpr, ExplainVerboseExpr};
 
     fn build_query_engine_state() -> QueryEngineState {
         QueryEngineState::new(
@@ -6358,5 +6393,91 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
             }
             _ => panic!("Expected EmptyRelation, but got: {:?}", plan),
         }
+    }
+
+    #[tokio::test]
+    async fn test_explain_with_alias_ignored() {
+        let expr = parser::parse("test").unwrap();
+        let extension = promql_parser::parser::ast::Extension {
+            expr: Arc::new(ExplainVerboseExpr { expr: expr.clone() }),
+        };
+
+        let eval_stmt = EvalStmt {
+            expr: PromExpr::Extension(extension),
+            start: UNIX_EPOCH,
+            end: UNIX_EPOCH.checked_add(Duration::from_secs(10)).unwrap(),
+            interval: Duration::from_secs(5),
+            lookback_delta: Duration::from_secs(1),
+        };
+
+        let table_provider = build_test_table_provider_with_fields(
+            &[(DEFAULT_SCHEMA_NAME.to_string(), "test".to_string())],
+            &[],
+        )
+        .await;
+
+        let plan = PromPlanner::stmt_to_plan_with_alias(
+            table_provider,
+            &eval_stmt,
+            Some("series".to_string()),
+            &build_query_engine_state(),
+        )
+        .await
+        .unwrap();
+
+        let LogicalPlan::Explain(explain) = plan else {
+            panic!("Expected Explain, got: {:?}", plan);
+        };
+        let field_names = explain
+            .plan
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect::<Vec<_>>();
+        assert!(field_names.contains(&"series"));
+    }
+
+    #[tokio::test]
+    async fn test_analyze_with_alias_ignored() {
+        let expr = parser::parse("test").unwrap();
+        let extension = promql_parser::parser::ast::Extension {
+            expr: Arc::new(AnalyzeVerboseExpr { expr: expr.clone() }),
+        };
+
+        let eval_stmt = EvalStmt {
+            expr: PromExpr::Extension(extension),
+            start: UNIX_EPOCH,
+            end: UNIX_EPOCH.checked_add(Duration::from_secs(10)).unwrap(),
+            interval: Duration::from_secs(5),
+            lookback_delta: Duration::from_secs(1),
+        };
+
+        let table_provider = build_test_table_provider_with_fields(
+            &[(DEFAULT_SCHEMA_NAME.to_string(), "test".to_string())],
+            &[],
+        )
+        .await;
+
+        let plan = PromPlanner::stmt_to_plan_with_alias(
+            table_provider,
+            &eval_stmt,
+            Some("series".to_string()),
+            &build_query_engine_state(),
+        )
+        .await
+        .unwrap();
+
+        let LogicalPlan::Analyze(analyze) = plan else {
+            panic!("Expected Analyze, got: {:?}", plan);
+        };
+        let field_names = analyze
+            .input
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect::<Vec<_>>();
+        assert!(field_names.contains(&"series"));
     }
 }
