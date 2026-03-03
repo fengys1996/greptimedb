@@ -18,18 +18,85 @@ use std::sync::Arc;
 use arrow::compute;
 use arrow::util::display::{ArrayFormatter, FormatOptions};
 use arrow_array::cast::AsArray;
+use arrow_array::types::{Float64Type, Int64Type, UInt64Type};
 use arrow_array::{Array, ArrayRef, GenericListArray, ListArray, StructArray, new_null_array};
 use arrow_schema::{DataType, FieldRef};
 use snafu::{OptionExt, ResultExt, ensure};
 
-use crate::arrow_array::StringArray;
-use crate::error::{AlignJsonArraySnafu, ArrowComputeSnafu, Result};
+use crate::arrow_array::{MutableBinaryArray, StringArray, binary_array_value, string_array_value};
+use crate::error::{
+    AlignJsonArraySnafu, ArrowComputeSnafu, DeserializeSnafu, Result, SerializeSnafu,
+    UnsupportedArrowTypeSnafu,
+};
 
 pub struct JsonArray<'a> {
     inner: &'a ArrayRef,
 }
 
 impl JsonArray<'_> {
+    pub fn serialize_arrow_value(array: &ArrayRef, index: usize) -> Result<serde_json::Value> {
+        if array.is_null(index) {
+            return Ok(serde_json::Value::Null);
+        }
+
+        let value = match array.data_type() {
+            DataType::Null => serde_json::Value::Null,
+            DataType::Boolean => serde_json::Value::Bool(array.as_boolean().value(index)),
+            DataType::Int64 => {
+                serde_json::Value::from(array.as_primitive::<Int64Type>().value(index))
+            }
+            DataType::UInt64 => {
+                serde_json::Value::from(array.as_primitive::<UInt64Type>().value(index))
+            }
+            DataType::Float64 => {
+                serde_json::Value::from(array.as_primitive::<Float64Type>().value(index))
+            }
+            DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View => {
+                serde_json::Value::String(string_array_value(array, index).to_string())
+            }
+            DataType::Binary | DataType::LargeBinary | DataType::BinaryView => {
+                let v = binary_array_value(array, index);
+                serde_json::from_slice(v).with_context(|_| DeserializeSnafu {
+                    json: String::from_utf8(v.to_vec()).unwrap_or_else(|_| format!("{v:?}")),
+                })?
+            }
+            DataType::Struct(_) => {
+                let struct_array = array.as_struct();
+                let object = struct_array
+                    .fields()
+                    .iter()
+                    .zip(struct_array.columns())
+                    .map(|(field, column)| {
+                        Ok((
+                            field.name().clone(),
+                            Self::serialize_arrow_value(column, index)?,
+                        ))
+                    })
+                    .collect::<Result<serde_json::Map<String, serde_json::Value>>>()?;
+                serde_json::Value::Object(object)
+            }
+            DataType::List(_) => {
+                let list_array = array.as_list::<i32>();
+                let values = list_array.value(index);
+                serde_json::Value::Array(Self::serialize_arrow_values(&values)?)
+            }
+            other => {
+                return UnsupportedArrowTypeSnafu {
+                    arrow_type: other.clone(),
+                }
+                    .fail();
+            }
+        };
+        common_telemetry::debug!("after serialize: {:?}", value);
+        Ok(value)
+    }
+
+    fn serialize_arrow_values(array: &ArrayRef) -> Result<Vec<serde_json::Value>> {
+        (0..array.len())
+            .map(|index| Self::serialize_arrow_value(array, index))
+            .collect()
+    }
+
     /// Align a JSON array to the `expect` data type. The `expect` data type is often the "largest"
     /// JSON type after some insertions in the table schema, while the JSON array previously
     /// written in the SST could be lagged behind it. So it's important to "align" the JSON array by
@@ -135,7 +202,36 @@ impl JsonArray<'_> {
         Ok(Arc::new(json_array))
     }
 
+    fn try_decode_variant(&self) -> Result<ArrayRef> {
+        let json_values = Self::serialize_arrow_values(self.inner)?;
+        let serialized_values = json_values
+            .iter()
+            .map(|value| {
+                (!value.is_null())
+                    .then(|| serde_json::to_vec(value))
+                    .transpose()
+            })
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context(SerializeSnafu)?;
+        let total_bytes = serialized_values.iter().flatten().map(Vec::len).sum();
+
+        let mut builder = MutableBinaryArray::with_capacity(self.inner.len(), total_bytes);
+        for serialized_value in serialized_values {
+            if let Some(bytes) = serialized_value {
+                builder.append_value(bytes);
+            } else {
+                builder.append_null();
+            }
+        }
+
+        Ok(Arc::new(builder.finish()))
+    }
+
     fn try_cast(&self, to_type: &DataType) -> Result<ArrayRef> {
+        if matches!(to_type, DataType::Binary) {
+            return self.try_decode_variant();
+        }
+
         if compute::can_cast_types(self.inner.data_type(), to_type) {
             return compute::cast(&self.inner, to_type).context(ArrowComputeSnafu);
         }

@@ -545,6 +545,7 @@ impl SeriesDistributor {
             Some(&part_metrics),
             true,
             channel_size,
+            None,
         )
         .await?;
         let mut metrics = SeriesDistributorMetrics::default();

@@ -550,14 +550,14 @@ impl RegionFlushTask {
         write_opts: &WriteOptions,
         mem_ranges: MemtableRanges,
     ) -> Result<FlushFlatMemResult> {
-        let batch_schema = to_flat_sst_arrow_schema(
-            &version.metadata,
-            &FlatSchemaOptions::from_encoding(version.metadata.primary_key_encoding),
-        );
+        let mut options = FlatSchemaOptions::from_encoding(version.metadata.primary_key_encoding);
+        options.override_schema = mem_ranges.schema();
+
+        let batch_schema = to_flat_sst_arrow_schema(&version.metadata, &options);
         let field_column_start =
             flat_format::field_column_start(&version.metadata, batch_schema.fields().len());
         let flat_sources = memtable_flat_sources(
-            batch_schema,
+            batch_schema.clone(),
             mem_ranges,
             &version.options,
             field_column_start,
@@ -565,7 +565,8 @@ impl RegionFlushTask {
         let mut tasks = Vec::with_capacity(flat_sources.encoded.len() + flat_sources.sources.len());
         let num_encoded = flat_sources.encoded.len();
         for (source, max_sequence) in flat_sources.sources {
-            let write_request = self.new_write_request(version, max_sequence, source);
+            let write_request =
+                self.new_write_request(version, max_sequence, source, batch_schema.clone());
             let access_layer = self.access_layer.clone();
             let write_opts = write_opts.clone();
             let semaphore = self.flush_semaphore.clone();
@@ -643,6 +644,7 @@ impl RegionFlushTask {
         version: &VersionRef,
         max_sequence: u64,
         source: FlatSource,
+        schema: SchemaRef,
     ) -> SstWriteRequest {
         let flat_format = version
             .options
@@ -653,6 +655,7 @@ impl RegionFlushTask {
             op_type: OperationType::Flush,
             metadata: version.metadata.clone(),
             source,
+            schema: Some(schema),
             cache_manager: self.cache_manager.clone(),
             storage: version.options.storage.clone(),
             max_sequence: Some(max_sequence),

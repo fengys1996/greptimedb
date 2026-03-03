@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt::{Debug, Display, Formatter};
 use std::str::FromStr;
@@ -315,6 +316,23 @@ fn merge(this: &JsonNativeType, that: &JsonNativeType) -> JsonNativeType {
         (JsonNativeType::Null, x) | (x, JsonNativeType::Null) => x.clone(),
         _ => JsonNativeType::Variant,
     }
+}
+
+pub fn merge_as_json_type<'a>(
+    left: &'a ArrowDataType,
+    right: &ArrowDataType,
+) -> Cow<'a, ArrowDataType> {
+    if left == right {
+        return Cow::Borrowed(left);
+    }
+
+    let mut left = JsonType::from(left);
+    let right = JsonType::from(right);
+    Cow::Owned(if left.merge(&right).is_ok() {
+        left.as_arrow_type()
+    } else {
+        ArrowDataType::Utf8
+    })
 }
 
 impl From<&ArrowDataType> for JsonType {

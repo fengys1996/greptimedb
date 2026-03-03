@@ -18,6 +18,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Instant;
 
+use arrow_schema::SchemaRef as ArrowSchemaRef;
 use async_stream::try_stream;
 use common_error::ext::BoxedError;
 use common_recordbatch::util::ChainedRecordBatchStream;
@@ -130,7 +131,10 @@ impl SeqScan {
     ///
     /// # Panics
     /// Panics if the compaction flag is not set.
-    pub async fn build_flat_reader_for_compaction(&self) -> Result<BoxedRecordBatchStream> {
+    pub async fn build_flat_reader_for_compaction(
+        &self,
+        json_concretized_schema: Option<ArrowSchemaRef>,
+    ) -> Result<BoxedRecordBatchStream> {
         assert!(self.stream_ctx.input.compaction);
 
         let metrics_set = ExecutionPlanMetricsSet::new();
@@ -143,6 +147,7 @@ impl SeqScan {
             partition_ranges,
             &part_metrics,
             self.pruner.clone(),
+            json_concretized_schema,
         )
         .await?;
         Ok(reader)
@@ -155,6 +160,7 @@ impl SeqScan {
         partition_ranges: &[PartitionRange],
         part_metrics: &PartitionMetrics,
         pruner: Arc<Pruner>,
+        json_concretized_schema: Option<ArrowSchemaRef>,
     ) -> Result<BoxedRecordBatchStream> {
         pruner.add_partition_ranges(partition_ranges);
         let partition_pruner = Arc::new(PartitionPruner::new(pruner, partition_ranges));
@@ -186,6 +192,7 @@ impl SeqScan {
             None,
             false,
             compute_parallel_channel_size(DEFAULT_READ_BATCH_SIZE),
+            json_concretized_schema,
         )
         .await
     }
@@ -201,6 +208,7 @@ impl SeqScan {
         part_metrics: Option<&PartitionMetrics>,
         skip_dedup: bool,
         channel_size: usize,
+        json_concretized_schema: Option<ArrowSchemaRef>,
     ) -> Result<BoxedRecordBatchStream> {
         if let Some(semaphore) = semaphore.as_ref() {
             // Read sources in parallel.
@@ -219,7 +227,8 @@ impl SeqScan {
             // that source may have duplicate rows.
             sources.pop().unwrap()
         } else {
-            let schema = mapper.input_arrow_schema(stream_ctx.input.compaction);
+            let schema =
+                mapper.input_arrow_schema(stream_ctx.input.compaction, json_concretized_schema);
             let metrics_reporter = part_metrics.map(|m| m.merge_metrics_reporter());
             let reader =
                 FlatMergeReader::new(schema, sources, DEFAULT_READ_BATCH_SIZE, metrics_reporter)
@@ -305,6 +314,7 @@ impl SeqScan {
             Some(part_metrics),
             false,
             channel_size,
+            None,
         )
         .await?;
 
