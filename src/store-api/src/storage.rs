@@ -28,7 +28,7 @@ pub use datatypes::schema::{
 pub use self::descriptors::*;
 pub use self::file::{FileId, FileRef, FileRefsManifest, GcReport, IndexVersion, ParseIdError};
 pub use self::requests::{
-    ProjectionInput, ScanRequest, TimeSeriesDistribution, TimeSeriesRowSelector,
+    NestedPath, ProjectionInput, ScanRequest, TimeSeriesDistribution, TimeSeriesRowSelector,
     VectorDistanceMetric, VectorIndexEngine, VectorIndexEngineType, VectorSearchMatches,
     VectorSearchRequest,
 };

@@ -14,7 +14,7 @@
 
 //! Scans a region according to the scan request.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::num::NonZeroU64;
 use std::sync::Arc;
@@ -37,7 +37,8 @@ use snafu::{OptionExt as _, ResultExt};
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::region_engine::{PartitionRange, RegionScannerRef};
 use store_api::storage::{
-    ColumnId, RegionId, ScanRequest, SequenceRange, TimeSeriesDistribution, TimeSeriesRowSelector,
+    ColumnId, NestedPath, ProjectionInput, RegionId, ScanRequest, SequenceRange,
+    TimeSeriesDistribution, TimeSeriesRowSelector,
 };
 use table::predicate::{Predicate, build_time_range_predicate};
 use tokio::sync::{Semaphore, mpsc};
@@ -159,6 +160,55 @@ impl Scanner {
             Scanner::Series(series_scan) => series_scan.prepare(request).unwrap(),
         }
     }
+}
+
+/// Projection used by the storage layer.
+///
+/// A projection describes which columns and nested fields should be read
+/// from storage. Each projected column is identified by its [`ColumnId`],
+/// which represents the root column in the storage schema.
+///
+/// Nested fields under the column are specified by [`NestedPath`] entries.
+/// Note that the root column itself is **not included** in the path.
+///
+/// For example, given a column `j` with nested fields:
+///
+/// ```text
+/// j
+/// ├── a
+/// └── b
+///     └── c
+/// ```
+///
+/// The following SQL:
+///
+/// SELECT j.a, j.b.c FROM t
+///
+/// may produce a projection like:
+///
+/// ```text
+/// ColumnProjection {
+///     column_id: j,
+///     paths: [
+///         ["a"],
+///         ["b", "c"],
+///     ]
+/// }
+/// ```
+///
+/// If `paths` is empty, the whole column will be read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Projection {
+    pub cols: Vec<ColumnProjection>,
+}
+
+/// Projection for a single column.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ColumnProjection {
+    column_id: ColumnId,
+    /// Nested filed paths under this column.
+    /// Empty means reading the whole column.
+    paths: Vec<NestedPath>,
 }
 
 #[cfg_attr(doc, aquamarine::aquamarine)]
@@ -411,16 +461,12 @@ impl ScanRegion {
         let predicate = PredicateGroup::new(&self.version.metadata, &self.request.filters)?;
         let flat_format = self.use_flat_format();
 
-        let read_column_ids = match &self.request.projection_input.projection {
-            Some(p) => self.build_read_column_ids(p, &predicate)?,
-            None => self
-                .version
-                .metadata
-                .column_metadatas
-                .iter()
-                .map(|col| col.column_id)
-                .collect(),
-        };
+        let read_column_ids: Vec<_> = self
+            .build_projection(&self.request.projection_input, &predicate)?
+            .cols
+            .into_iter()
+            .map(|col| col.column_id)
+            .collect();
 
         // The mapper always computes projected column ids as the schema of SSTs may change.
         let mapper = match &self.request.projection_input.projection {
@@ -583,6 +629,58 @@ impl ScanRegion {
             .expect("Time index must have timestamp-compatible type")
             .unit();
         build_time_range_predicate(&time_index.column_schema.name, unit, &self.request.filters)
+    }
+
+    /// Builds the projection to read according to the projection input and filters.
+    fn build_projection(
+        &self,
+        projection_input: &ProjectionInput,
+        predicate: &PredicateGroup,
+    ) -> Result<Projection> {
+        let metadata = &self.version.metadata;
+        let ProjectionInput {
+            projection,
+            nested_paths,
+        } = projection_input;
+        let mut nested_paths_by_name = HashMap::<String, Vec<NestedPath>>::new();
+        for path in nested_paths {
+            let Some((root, nested_path)) = path.split_first() else {
+                return InvalidRequestSnafu {
+                    region_id: metadata.region_id,
+                    reason: "nested projection path cannot be empty".to_string(),
+                }
+                .fail();
+            };
+            nested_paths_by_name
+                .entry(root.clone())
+                .or_default()
+                .push(nested_path.to_vec());
+        }
+
+        let read_cols = match projection {
+            Some(projection) => self.build_read_column_ids(projection, predicate)?,
+            None => metadata
+                .column_metadatas
+                .iter()
+                .map(|col| col.column_id)
+                .collect(),
+        }
+        .into_iter()
+        .map(|column_id| {
+            let column = metadata
+                .column_by_id(column_id)
+                .expect("read column id must exist in metadata");
+            ColumnProjection {
+                column_id,
+                paths: nested_paths_by_name
+                    .get(column.column_schema.name.as_str())
+                    .cloned()
+                    .unwrap_or_default(),
+            }
+        })
+        .collect();
+
+        Ok(Projection { cols: read_cols })
     }
 
     /// Return all columns id to read according to the projection and filters.
@@ -1858,6 +1956,126 @@ mod tests {
             .unwrap();
         // Projection order preserved, extra columns appended in schema order.
         assert_eq!(vec![4, 1, 3], read_ids);
+    }
+
+    #[tokio::test]
+    async fn test_build_projection_includes_nested_paths_and_filters() {
+        let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
+        let version = new_version(metadata.clone());
+        let env = SchedulerEnv::new().await;
+        let projection_input = ProjectionInput::new()
+            .with_projection(Some(vec![4]))
+            .with_nested_paths(vec![
+                vec!["v1".to_string(), "a".to_string()],
+                vec!["v1".to_string(), "b".to_string(), "c".to_string()],
+                vec!["k0".to_string(), "x".to_string()],
+            ]);
+        let request = ScanRequest {
+            projection_input: projection_input.clone(),
+            filters: vec![col("k0").eq(lit("foo"))],
+            ..Default::default()
+        };
+        let scan_region = ScanRegion::new(
+            version,
+            env.access_layer.clone(),
+            request,
+            CacheStrategy::Disabled,
+        );
+        let predicate =
+            PredicateGroup::new(metadata.as_ref(), &scan_region.request.filters).unwrap();
+
+        let projection = scan_region
+            .build_projection(&projection_input, &predicate)
+            .unwrap();
+        assert_eq!(
+            Projection {
+                cols: vec![
+                    ColumnProjection {
+                        column_id: 4,
+                        paths: vec![
+                            vec!["a".to_string()],
+                            vec!["b".to_string(), "c".to_string()]
+                        ],
+                    },
+                    ColumnProjection {
+                        column_id: 0,
+                        paths: vec![vec!["x".to_string()]],
+                    },
+                ],
+            },
+            projection
+        );
+    }
+
+    #[tokio::test]
+    async fn test_build_projection_empty_projection_reads_time_index() {
+        let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
+        let version = new_version(metadata.clone());
+        let env = SchedulerEnv::new().await;
+        let projection_input = ProjectionInput::new().with_projection(Some(vec![]));
+        let request = ScanRequest {
+            projection_input: projection_input.clone(),
+            ..Default::default()
+        };
+        let scan_region = ScanRegion::new(
+            version,
+            env.access_layer.clone(),
+            request,
+            CacheStrategy::Disabled,
+        );
+        let predicate =
+            PredicateGroup::new(metadata.as_ref(), &scan_region.request.filters).unwrap();
+
+        let projection = scan_region
+            .build_projection(&projection_input, &predicate)
+            .unwrap();
+        assert_eq!(
+            Projection {
+                cols: vec![ColumnProjection {
+                    column_id: 2,
+                    paths: vec![],
+                }],
+            },
+            projection
+        );
+    }
+
+    #[tokio::test]
+    async fn test_build_projection_none_means_read_all_columns() {
+        let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
+        let version = new_version(metadata.clone());
+        let env = SchedulerEnv::new().await;
+        let projection_input = ProjectionInput::new()
+            .with_nested_paths(vec![vec!["unknown".to_string(), "a".to_string()]]);
+        let request = ScanRequest {
+            projection_input: projection_input.clone(),
+            ..Default::default()
+        };
+        let scan_region = ScanRegion::new(
+            version,
+            env.access_layer.clone(),
+            request,
+            CacheStrategy::Disabled,
+        );
+        let predicate =
+            PredicateGroup::new(metadata.as_ref(), &scan_region.request.filters).unwrap();
+
+        let projection = scan_region
+            .build_projection(&projection_input, &predicate)
+            .unwrap();
+        assert_eq!(
+            Projection {
+                cols: metadata
+                    .column_metadatas
+                    .iter()
+                    .map(|column| ColumnProjection {
+                        column_id: column.column_id,
+                        paths: vec![],
+                    })
+                    .collect(),
+            },
+            projection
+        );
     }
 
     #[tokio::test]
