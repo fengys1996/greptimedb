@@ -93,6 +93,57 @@ pub enum TimeSeriesDistribution {
     PerSeries,
 }
 
+/// A nested field access path.
+///
+/// Each path represents a field access on a nested column.
+///
+/// Example:
+/// - `j.a.b` -> `["j", "a", "b"]`
+pub type NestedPath = Vec<String>;
+
+/// Projection information used during table scanning.
+#[derive(Default)]
+pub struct ProjectionInput {
+    /// Top-level column projection.
+    ///
+    /// This corresponds to the root-level column pruning typically passed
+    /// from the query engine (e.g., `TableProvider::scan` in DataFusion).
+    ///
+    /// If `None`, all root columns are considered required.
+    /// Otherwise, only the columns with the specified indices are needed.
+    pub projection: Option<Vec<usize>>,
+    /// Nested field access paths used for sub-field projection.
+    ///
+    /// It extends and refines the top-level projection by specifying nested
+    /// field accesses inside complex columns such as JSON or struct columns.
+    ///
+    /// In other words:
+    /// - `projection` determines **which root columns are needed**
+    /// - `nested_paths` further determines **which sub-fields inside those
+    ///   columns are required**
+    ///
+    /// Each path starts with the root column name and continues with
+    /// nested field names.
+    pub nested_paths: Vec<NestedPath>,
+}
+
+impl ProjectionInput {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_projection(self, projection: Option<Vec<usize>>) -> Self {
+        Self { projection, ..self }
+    }
+
+    pub fn with_nested_paths(self, nested_paths: Vec<NestedPath>) -> Self {
+        Self {
+            nested_paths,
+            ..self
+        }
+    }
+}
+
 #[derive(Default, Clone, Debug, PartialEq)]
 pub struct ScanRequest {
     /// Indices of columns to read, `None` to read all columns. This indices is
