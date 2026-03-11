@@ -44,7 +44,8 @@ impl FileRegion {
     pub fn query(&self, request: ScanRequest) -> Result<SendableRecordBatchStream> {
         let store = build_backend(&self.url, &self.options).context(BuildBackendSnafu)?;
 
-        let file_projection = self.projection_pushdown_to_file(&request.projection)?;
+        let file_projection =
+            self.projection_pushdown_to_file(&request.projection_input.projection)?;
         let file_filters = self.filters_pushdown_to_file(&request.filters)?;
         let file_schema = Arc::new(Schema::new(self.file_options.file_column_schemas.clone()));
 
@@ -70,7 +71,7 @@ impl FileRegion {
             },
         )?;
 
-        let scan_schema = self.scan_schema(&request.projection)?;
+        let scan_schema = self.scan_schema(&request.projection_input.projection)?;
 
         Ok(Box::pin(FileToScanRegionStream::new(
             scan_schema,

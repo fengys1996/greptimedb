@@ -110,7 +110,7 @@ impl NumbersDataSource {
 
 impl DataSource for NumbersDataSource {
     fn get_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream, BoxedError> {
-        let projected_schema = match &request.projection {
+        let projected_schema = match &request.projection_input.projection {
             Some(projection) => Arc::new(self.schema.try_project(projection).unwrap()),
             None => self.schema.clone(),
         };
@@ -118,7 +118,7 @@ impl DataSource for NumbersDataSource {
             limit: request.limit.unwrap_or(100) as u32,
             schema: self.schema.clone(),
             already_run: false,
-            projection: request.projection,
+            projection: request.projection_input.projection,
             projected_schema,
         }))
     }

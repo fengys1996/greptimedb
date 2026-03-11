@@ -143,7 +143,7 @@ impl MetricEngineInner {
         mut request: ScanRequest,
     ) -> Result<ScanRequest> {
         // transform projection
-        let physical_projection = if let Some(projection) = &request.projection {
+        let physical_projection = if let Some(projection) = &request.projection_input.projection {
             self.transform_projection(physical_region_id, logical_region_id, projection)
                 .await?
         } else {
@@ -151,7 +151,7 @@ impl MetricEngineInner {
                 .await?
         };
 
-        request.projection = Some(physical_projection);
+        request.projection_input.projection = Some(physical_projection);
 
         // add table filter
         request
@@ -293,6 +293,7 @@ impl MetricEngineInner {
 #[cfg(test)]
 mod test {
     use store_api::region_request::RegionRequest;
+    use store_api::storage::ProjectionInput;
 
     use super::*;
     use crate::test_util::{
@@ -325,8 +326,10 @@ mod test {
             .unwrap();
 
         // check explicit projection
+        let projection_input =
+            ProjectionInput::new().with_projection(Some(vec![0, 1, 2, 3, 4, 5, 6]));
         let scan_req = ScanRequest {
-            projection: Some(vec![0, 1, 2, 3, 4, 5, 6]),
+            projection_input,
             filters: vec![],
             ..Default::default()
         };
@@ -338,7 +341,10 @@ mod test {
             .await
             .unwrap();
 
-        assert_eq!(scan_req.projection.unwrap(), vec![11, 10, 9, 8, 0, 1, 4]);
+        assert_eq!(
+            scan_req.projection_input.projection.unwrap(),
+            vec![11, 10, 9, 8, 0, 1, 4]
+        );
         assert_eq!(scan_req.filters.len(), 1);
         assert_eq!(
             scan_req.filters[0],
@@ -354,6 +360,9 @@ mod test {
             .transform_request(physical_region_id, logical_region_id, scan_req)
             .await
             .unwrap();
-        assert_eq!(scan_req.projection.unwrap(), vec![11, 10, 9, 8, 0, 1, 4]);
+        assert_eq!(
+            scan_req.projection_input.projection.unwrap(),
+            vec![11, 10, 9, 8, 0, 1, 4]
+        );
     }
 }
