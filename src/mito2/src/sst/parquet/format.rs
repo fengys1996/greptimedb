@@ -151,6 +151,32 @@ pub enum ReadFormat {
     Flat(FlatReadFormat),
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct ProjectionIndices {
+    pub root: Vec<usize>,
+    pub leaves: Vec<usize>,
+}
+
+impl ProjectionIndices {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_root(mut self, root: Vec<usize>) -> self {
+        self.root = root;
+        self
+    }
+
+    pub fn with_leaves(mut self, leaves: Vec<usize>) -> self {
+        self.leaves = leaves;
+        self
+    }
+
+    pub fn root(self) -> Vec<usize> {
+        self.root
+    }
+}
+
 impl ReadFormat {
     /// Creates a helper to read the primary key format.
     pub fn new_primary_key(
@@ -259,11 +285,15 @@ impl ReadFormat {
     }
 
     /// Gets sorted projection indices to read.
-    pub(crate) fn projection_indices(&self) -> &[usize] {
+    pub(crate) fn projection_indices(&self) -> ProjectionIndices {
         match self {
             ReadFormat::PrimaryKey(format) => format.projection_indices(),
             ReadFormat::Flat(format) => format.projection_indices(),
         }
+    }
+
+    pub(crate) fn projection_indices_v2(&self) -> ProjectionIndices {
+        self.projection_indices().clone()
     }
 
     /// Returns min values of specific column in row groups.
@@ -416,7 +446,7 @@ pub struct PrimaryKeyReadFormat {
     /// In SST schema, fields are stored in the front of the schema.
     field_id_to_index: HashMap<ColumnId, usize>,
     /// Indices of columns to read from the SST. It contains all internal columns.
-    projection_indices: Vec<usize>,
+    projection_indices: ProjectionIndices,
     /// Field column id to their index in the projected schema (
     /// the schema of [Batch]).
     field_id_to_projected_index: HashMap<ColumnId, usize>,
@@ -484,8 +514,8 @@ impl PrimaryKeyReadFormat {
     }
 
     /// Gets sorted projection indices to read.
-    pub(crate) fn projection_indices(&self) -> &[usize] {
-        &self.projection_indices
+    pub(crate) fn projection_indices(&self) -> ProjectionIndices {
+        self.projection_indices.clone()
     }
 
     /// Gets the field id to projected index.
@@ -808,7 +838,7 @@ impl PrimaryKeyReadFormat {
 /// Helper to compute the projection for the SST.
 pub(crate) struct FormatProjection {
     /// Indices of columns to read from the SST. It contains all internal columns.
-    pub(crate) projection_indices: Vec<usize>,
+    pub(crate) projection_indices: ProjectionIndices,
     /// Column id to their index in the projected schema (
     /// the schema after projection).
     ///
@@ -863,7 +893,7 @@ impl FormatProjection {
             .collect();
 
         Self {
-            projection_indices,
+            projection_indices: ProjectionIndices::Root(projection_indices),
             column_id_to_projected_index,
         }
     }
@@ -1212,16 +1242,28 @@ mod tests {
         let metadata = build_test_region_metadata();
         // Only read tag1
         let read_format = ReadFormat::new_primary_key(metadata.clone(), [3].iter().copied());
-        assert_eq!(&[2, 3, 4, 5], read_format.projection_indices());
+        assert_eq!(
+            &[2, 3, 4, 5],
+            read_format.projection_indices().root().as_slice()
+        );
         // Only read field1
         let read_format = ReadFormat::new_primary_key(metadata.clone(), [4].iter().copied());
-        assert_eq!(&[0, 2, 3, 4, 5], read_format.projection_indices());
+        assert_eq!(
+            &[0, 2, 3, 4, 5],
+            read_format.projection_indices().root().as_slice()
+        );
         // Only read ts
         let read_format = ReadFormat::new_primary_key(metadata.clone(), [5].iter().copied());
-        assert_eq!(&[2, 3, 4, 5], read_format.projection_indices());
+        assert_eq!(
+            &[2, 3, 4, 5],
+            read_format.projection_indices().root().as_slice()
+        );
         // Read field0, tag0, ts
         let read_format = ReadFormat::new_primary_key(metadata, [2, 1, 5].iter().copied());
-        assert_eq!(&[1, 2, 3, 4, 5], read_format.projection_indices());
+        assert_eq!(
+            &[1, 2, 3, 4, 5],
+            read_format.projection_indices().root().as_slice()
+        );
     }
 
     #[test]
@@ -1449,24 +1491,36 @@ mod tests {
         let read_format =
             ReadFormat::new_flat(metadata.clone(), [3].iter().copied(), None, "test", false)
                 .unwrap();
-        assert_eq!(&[1, 4, 5, 6, 7], read_format.projection_indices());
+        assert_eq!(
+            &[1, 4, 5, 6, 7],
+            read_format.projection_indices().root().as_slice()
+        );
 
         // Only read field1 (column_id=4, index=2) + fixed columns
         let read_format =
             ReadFormat::new_flat(metadata.clone(), [4].iter().copied(), None, "test", false)
                 .unwrap();
-        assert_eq!(&[2, 4, 5, 6, 7], read_format.projection_indices());
+        assert_eq!(
+            &[2, 4, 5, 6, 7],
+            read_format.projection_indices().root().as_slice()
+        );
 
         // Only read ts (column_id=5, index=4) + fixed columns (ts is already included in fixed)
         let read_format =
             ReadFormat::new_flat(metadata.clone(), [5].iter().copied(), None, "test", false)
                 .unwrap();
-        assert_eq!(&[4, 5, 6, 7], read_format.projection_indices());
+        assert_eq!(
+            &[4, 5, 6, 7],
+            read_format.projection_indices().root().as_slice()
+        );
 
         // Read field0(column_id=2, index=3), tag0(column_id=1, index=0), ts(column_id=5, index=4) + fixed columns
         let read_format =
             ReadFormat::new_flat(metadata, [2, 1, 5].iter().copied(), None, "test", false).unwrap();
-        assert_eq!(&[0, 3, 4, 5, 6, 7], read_format.projection_indices());
+        assert_eq!(
+            &[0, 3, 4, 5, 6, 7],
+            read_format.projection_indices().root().as_slice()
+        );
     }
 
     #[test]

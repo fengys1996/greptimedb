@@ -52,8 +52,7 @@ use crate::error::{
     NewRecordBatchSnafu, Result,
 };
 use crate::sst::parquet::format::{
-    FormatProjection, INTERNAL_COLUMN_NUM, PrimaryKeyArray, PrimaryKeyReadFormat, ReadFormat,
-    StatValues,
+    FormatProjection, PrimaryKeyArray, PrimaryKeyReadFormat, ProjectionIndices, ReadFormat, StatValues, INTERNAL_COLUMN_NUM
 };
 use crate::sst::{
     FlatSchemaOptions, flat_sst_arrow_schema_column_num, tag_maybe_to_dictionary_field,
@@ -249,9 +248,9 @@ impl FlatReadFormat {
     }
 
     /// Gets sorted projection indices to read from the SST file.
-    pub(crate) fn projection_indices(&self) -> &[usize] {
+    pub(crate) fn projection_indices(&self) -> ProjectionIndices {
         match &self.parquet_adapter {
-            ParquetAdapter::Flat(p) => &p.format_projection.projection_indices,
+            ParquetAdapter::Flat(p) => p.format_projection.projection_indices.clone(),
             ParquetAdapter::PrimaryKeyToFlat(p) => p.format.projection_indices(),
         }
     }
@@ -403,7 +402,7 @@ impl ParquetPrimaryKeyToFlat {
             (
                 None,
                 FormatProjection {
-                    projection_indices: format.projection_indices().to_vec(),
+                    projection_indices: format.projection_indices(),
                     column_id_to_projected_index: format.field_id_to_projected_index().clone(),
                 },
             )

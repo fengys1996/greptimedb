@@ -35,6 +35,7 @@ use crate::cache::CacheStrategy;
 use crate::error::{InvalidRequestSnafu, Result};
 use crate::read::Batch;
 use crate::read::flat_projection::FlatProjectionMapper;
+use crate::read::scan_region::Projection;
 
 /// Only cache vector when its length `<=` this value.
 const MAX_VECTOR_LENGTH_TO_CACHE: usize = 16384;
@@ -117,11 +118,17 @@ impl ProjectionMapper {
 
     /// Returns ids of projected columns that we need to read
     /// from memtables and SSTs.
+    #[allow(dead_code)]
     pub(crate) fn column_ids(&self) -> &[ColumnId] {
         match self {
             ProjectionMapper::PrimaryKey(m) => m.column_ids(),
             ProjectionMapper::Flat(m) => m.column_ids(),
         }
+    }
+
+    pub(crate) fn projection(&self) -> Projection {
+        // TODO(fys): impl it
+        todo!()
     }
 
     /// Returns the schema of converted [RecordBatch].

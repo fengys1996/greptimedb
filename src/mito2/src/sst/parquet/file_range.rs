@@ -281,7 +281,7 @@ impl FileRange {
                 self.file_handle().file_id().file_id(),
                 self.row_group_idx,
                 self.context.reader_builder.cache_strategy().clone(),
-                self.context.read_format().projection_indices(),
+                self.context.read_format().projection_indices().root(),
                 flat_row_group_reader,
             );
             FlatPruneReader::new_with_last_row_reader(self.context.clone(), reader, skip_fields)

@@ -211,6 +211,12 @@ pub struct ColumnProjection {
     paths: Vec<NestedPath>,
 }
 
+impl Projection {
+    pub fn column_ids(&self) -> Vec<ColumnId> {
+        self.cols.iter().map(|col| col.column_id).collect()
+    }
+}
+
 #[cfg_attr(doc, aquamarine::aquamarine)]
 /// Helper to scans a region by [ScanRequest].
 ///
@@ -461,6 +467,7 @@ impl ScanRegion {
         let predicate = PredicateGroup::new(&self.version.metadata, &self.request.filters)?;
         let flat_format = self.use_flat_format();
 
+        // TODO: change it next.
         let read_column_ids: Vec<_> = self
             .build_projection(&self.request.projection_input, &predicate)?
             .cols
@@ -907,10 +914,10 @@ pub struct ScanInput {
     access_layer: AccessLayerRef,
     /// Maps projected Batches to RecordBatches.
     pub(crate) mapper: Arc<ProjectionMapper>,
-    /// Column ids to read from memtables and SSTs.
+    /// Column ids with nested-path projection information used to read from memtables and SSTs.
     /// Notice this is different from the columns in `mapper` which are projected columns.
     /// But this read columns might also include non-projected columns needed for filtering.
-    pub(crate) read_column_ids: Vec<ColumnId>,
+    pub(crate) projection: Projection,
     /// Time range filter for time index.
     time_range: Option<TimestampRange>,
     /// Predicate to push down.
@@ -965,7 +972,7 @@ impl ScanInput {
     pub(crate) fn new(access_layer: AccessLayerRef, mapper: ProjectionMapper) -> ScanInput {
         ScanInput {
             access_layer,
-            read_column_ids: mapper.column_ids().to_vec(),
+            projection: mapper.projection(),
             mapper: Arc::new(mapper),
             time_range: None,
             predicate: PredicateGroup::default(),
@@ -1247,7 +1254,7 @@ impl ScanInput {
             .access_layer
             .read_sst(file.clone())
             .predicate(predicate)
-            .projection(Some(self.read_column_ids.clone()))
+            .projection(Some(self.projection.clone()))
             .cache(self.cache_strategy.clone())
             .inverted_index_appliers(self.inverted_index_appliers.clone())
             .bloom_filter_index_appliers(self.bloom_filter_index_appliers.clone())
@@ -1259,6 +1266,7 @@ impl ScanInput {
                 reader.vector_index_applier(self.vector_index_applier.clone(), self.vector_index_k);
             reader
         };
+        // TODO: change it
         let res = reader
             .expected_metadata(Some(self.mapper.metadata().clone()))
             .flat_format(self.flat_format)

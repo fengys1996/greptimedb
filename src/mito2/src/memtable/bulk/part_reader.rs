@@ -65,7 +65,7 @@ impl EncodedBulkPartIter {
 
         let projection_mask = ProjectionMask::roots(
             parquet_meta.file_metadata().schema_descr(),
-            context.read_format().projection_indices().iter().copied(),
+            context.read_format().projection_indices().root().iter().copied(),
         );
         let builder =
             MemtableRowGroupReaderBuilder::try_new(&context, projection_mask, parquet_meta, data)?;
@@ -260,13 +260,13 @@ impl BulkPartBatchIter {
 
     /// Applies projection to the RecordBatch if needed.
     fn apply_projection(&self, record_batch: RecordBatch) -> error::Result<RecordBatch> {
-        let projection_indices = self.context.read_format().projection_indices();
+        let projection_indices = self.context.read_format().projection_indices().root();
         if projection_indices.len() == record_batch.num_columns() {
             return Ok(record_batch);
         }
 
         record_batch
-            .project(projection_indices)
+            .project(&projection_indices)
             .context(ComputeArrowSnafu)
     }
 
