@@ -121,7 +121,9 @@ use store_api::region_request::{
     AffectedRows, RegionCatchupRequest, RegionOpenRequest, RegionRequest,
 };
 use store_api::sst_entry::{ManifestSstEntry, PuffinIndexMetaEntry, StorageSstEntry};
-use store_api::storage::{FileId, FileRefsManifest, RegionId, ScanRequest, SequenceNumber};
+use store_api::storage::{
+    FileId, FileRefsManifest, ProjectionInput, RegionId, ScanRequest, SequenceNumber,
+};
 use tokio::sync::{Semaphore, oneshot};
 
 use crate::access_layer::RegionFilePathFactory;
@@ -1013,7 +1015,36 @@ impl EngineInner {
 
     /// Handles the scan `request` and returns a [ScanRegion].
     #[tracing::instrument(skip_all, fields(region_id = %region_id))]
-    fn scan_region(&self, region_id: RegionId, request: ScanRequest) -> Result<ScanRegion> {
+    fn scan_region(&self, region_id: RegionId, mut request: ScanRequest) -> Result<ScanRegion> {
+        // TODO: remove it later.
+        // ---------------------------------------------------------
+        if let Ok(raw) = std::env::var("GREPTIME_PROJECTION_NESTED_PATHS") {
+            let mut projection = Vec::new();
+            let mut nested_paths = Vec::new();
+            for item in raw.split(',') {
+                let (idx_str, path_str) = item.split_once(':').unwrap();
+                let idx: usize = idx_str.trim().parse().unwrap();
+                let path = path_str
+                    .trim()
+                    .split('.')
+                    .map(|segment| segment.trim())
+                    .filter(|segment| !segment.is_empty())
+                    .map(|segment| segment.to_string())
+                    .collect::<Vec<_>>();
+
+                projection.push(idx);
+                nested_paths.push(path);
+            }
+
+            request.projection_input = Some(
+                ProjectionInput::new()
+                    .with_projection(projection)
+                    .with_nested_paths(nested_paths),
+            );
+        }
+        info!("projecion_input: {:?}", request.projection_input);
+        // ---------------------------------------------------------
+
         let query_start = Instant::now();
         // Reading a region doesn't need to go through the region worker thread.
         let region = self.find_region(region_id)?;
