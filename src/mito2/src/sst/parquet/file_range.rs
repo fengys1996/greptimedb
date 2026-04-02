@@ -275,7 +275,7 @@ impl FileRange {
                 self.file_handle().file_id().file_id(),
                 self.row_group_idx,
                 cache_strategy,
-                self.context.read_format().projection_indices(),
+                self.context.read_format().parquet_read_columns(),
                 flat_row_group_reader,
             );
             FlatPruneReader::new_with_last_row_reader(self.context.clone(), reader, skip_fields)
@@ -957,19 +957,16 @@ mod tests {
     use datafusion_expr::{col, lit};
 
     use super::*;
+    use crate::read::read_columns::ReadColumns;
     use crate::sst::parquet::format::ReadFormat;
     use crate::test_util::sst_util::{new_record_batch_with_custom_sequence, sst_region_metadata};
 
     fn new_test_range_base(filters: Vec<SimpleFilterContext>) -> RangeBase {
         let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
-        let read_format = ReadFormat::new_flat(
-            metadata.clone(),
-            metadata.column_metadatas.iter().map(|c| c.column_id),
-            None,
-            "test",
-            true,
-        )
-        .unwrap();
+        let read_cols =
+            ReadColumns::from_column_ids(metadata.column_metadatas.iter().map(|c| c.column_id));
+        let read_format =
+            ReadFormat::new_flat(metadata.clone(), read_cols, None, "test", true).unwrap();
 
         RangeBase {
             filters,

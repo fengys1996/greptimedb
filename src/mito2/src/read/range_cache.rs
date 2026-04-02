@@ -26,12 +26,13 @@ use datatypes::prelude::ConcreteDataType;
 use futures::TryStreamExt;
 use snafu::ResultExt;
 use store_api::region_engine::PartitionRange;
-use store_api::storage::{ColumnId, FileId, RegionId, TimeSeriesRowSelector};
+use store_api::storage::{FileId, RegionId, TimeSeriesRowSelector};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::cache::CacheStrategy;
 use crate::error::{ComputeArrowSnafu, Result, UnexpectedSnafu};
 use crate::read::BoxedRecordBatchStream;
+use crate::read::read_columns::ReadColumns;
 use crate::read::scan_region::StreamContext;
 use crate::read::scan_util::PartitionMetrics;
 use crate::region::options::MergeMode;
@@ -64,7 +65,7 @@ pub(crate) struct ScanRequestFingerprint {
 
 #[derive(Debug)]
 pub(crate) struct ScanRequestFingerprintBuilder {
-    pub(crate) read_column_ids: Vec<ColumnId>,
+    pub(crate) read_columns: ReadColumns,
     pub(crate) read_column_types: Vec<Option<ConcreteDataType>>,
     pub(crate) filters: Vec<String>,
     pub(crate) time_filters: Vec<String>,
@@ -78,7 +79,7 @@ pub(crate) struct ScanRequestFingerprintBuilder {
 impl ScanRequestFingerprintBuilder {
     pub(crate) fn build(self) -> ScanRequestFingerprint {
         let Self {
-            read_column_ids,
+            read_columns,
             read_column_types,
             filters,
             time_filters,
@@ -91,7 +92,7 @@ impl ScanRequestFingerprintBuilder {
 
         ScanRequestFingerprint {
             inner: Arc::new(SharedScanRequestFingerprint {
-                read_column_ids,
+                read_columns,
                 read_column_types,
                 filters,
             }),
@@ -108,8 +109,8 @@ impl ScanRequestFingerprintBuilder {
 /// Non-copiable struct of the fingerprint.
 #[derive(Debug, PartialEq, Eq, Hash)]
 struct SharedScanRequestFingerprint {
-    /// Column ids of the projection.
-    read_column_ids: Vec<ColumnId>,
+    /// Logical columns of the projection.
+    read_columns: ReadColumns,
     /// Column types of the projection.
     /// We keep this to ensure we won't reuse the fingerprint after a schema change.
     read_column_types: Vec<Option<ConcreteDataType>>,
@@ -119,8 +120,8 @@ struct SharedScanRequestFingerprint {
 
 impl ScanRequestFingerprint {
     #[cfg(test)]
-    pub(crate) fn read_column_ids(&self) -> &[ColumnId] {
-        &self.inner.read_column_ids
+    pub(crate) fn read_columns(&self) -> &ReadColumns {
+        &self.inner.read_columns
     }
 
     #[cfg(test)]
@@ -155,7 +156,7 @@ impl ScanRequestFingerprint {
 
     pub(crate) fn estimated_size(&self) -> usize {
         mem::size_of::<SharedScanRequestFingerprint>()
-            + self.inner.read_column_ids.capacity() * mem::size_of::<ColumnId>()
+            + mem::size_of_val(self.inner.read_columns.columns())
             + self.inner.read_column_types.capacity() * mem::size_of::<Option<ConcreteDataType>>()
             + self.inner.filters.capacity() * mem::size_of::<String>()
             + self
@@ -590,7 +591,7 @@ pub fn bench_cache_flat_range_stream(
     let cache_strategy = CacheStrategy::EnableAll(cache_manager);
 
     let fingerprint = ScanRequestFingerprintBuilder {
-        read_column_ids: vec![],
+        read_columns: ReadColumns::from_column_ids(std::iter::empty()),
         read_column_types: vec![],
         filters: vec![],
         time_filters: vec![],
@@ -652,7 +653,7 @@ mod tests {
             region_id,
             row_groups: vec![],
             scan: ScanRequestFingerprintBuilder {
-                read_column_ids: vec![],
+                read_columns: ReadColumns::from_column_ids(std::iter::empty()),
                 read_column_types: vec![],
                 filters: vec![],
                 time_filters: vec![],
@@ -820,7 +821,7 @@ mod tests {
     #[test]
     fn normalizes_and_clears_time_filters() {
         let normalized = ScanRequestFingerprintBuilder {
-            read_column_ids: vec![1, 2],
+            read_columns: ReadColumns::from_column_ids(vec![1, 2]),
             read_column_types: vec![None, None],
             filters: vec!["k0 = 'foo'".to_string()],
             time_filters: vec![],
@@ -835,7 +836,7 @@ mod tests {
         assert!(normalized.time_filters().is_empty());
 
         let fingerprint = ScanRequestFingerprintBuilder {
-            read_column_ids: vec![1, 2],
+            read_columns: ReadColumns::from_column_ids(vec![1, 2]),
             read_column_types: vec![None, None],
             filters: vec!["k0 = 'foo'".to_string()],
             time_filters: vec!["ts >= 1000".to_string()],
@@ -849,7 +850,7 @@ mod tests {
 
         let reset = fingerprint.without_time_filters();
 
-        assert_eq!(reset.read_column_ids(), fingerprint.read_column_ids());
+        assert_eq!(reset.read_columns(), fingerprint.read_columns());
         assert_eq!(reset.read_column_types(), fingerprint.read_column_types());
         assert_eq!(reset.filters(), fingerprint.filters());
         assert!(reset.time_filters().is_empty());

@@ -20,19 +20,22 @@ use api::v1::SemanticType;
 use common_error::ext::BoxedError;
 use common_recordbatch::error::{ArrowComputeSnafu, ExternalSnafu, NewDfRecordBatchSnafu};
 use common_recordbatch::{DfRecordBatch, RecordBatch};
+use datafusion_common::cast_column;
 use datatypes::arrow::array::Array;
 use datatypes::arrow::datatypes::{DataType as ArrowDataType, Field};
+use datatypes::compute::CastOptions;
 use datatypes::prelude::{ConcreteDataType, DataType};
 use datatypes::schema::{Schema, SchemaRef};
 use datatypes::value::Value;
 use datatypes::vectors::Helper;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
-use store_api::storage::ColumnId;
+use store_api::storage::{ColumnId, ProjectionInput};
 
 use crate::cache::CacheStrategy;
 use crate::error::{InvalidRequestSnafu, RecordBatchSnafu, Result};
 use crate::read::projection::{read_column_ids_from_projection, repeated_vector_with_cache};
+use crate::read::read_columns::{ReadColumns, read_columns_from_projection};
 use crate::sst::parquet::flat_format::sst_column_id_indices;
 use crate::sst::parquet::format::FormatProjection;
 use crate::sst::{
@@ -48,11 +51,11 @@ pub struct FlatProjectionMapper {
     metadata: RegionMetadataRef,
     /// Schema for converted [RecordBatch] to return.
     output_schema: SchemaRef,
-    /// Ids of columns to read from memtables and SSTs.
+    /// The columns to read from memtables and SSTs.
     /// The mapper won't deduplicate the column ids.
     ///
     /// Note that this doesn't contain the `__table_id` and `__tsid`.
-    read_column_ids: Vec<ColumnId>,
+    read_cols: ReadColumns,
     /// Ids and DataTypes of columns of the expected batch.
     /// We can use this to check if the batch is compatible with the expected schema.
     ///
@@ -77,46 +80,46 @@ impl FlatProjectionMapper {
     ) -> Result<Self> {
         let projection: Vec<_> = projection.collect();
         let read_column_ids = read_column_ids_from_projection(metadata, &projection)?;
-        Self::new_with_read_columns(metadata, projection, read_column_ids)
+        let projection_input = ProjectionInput::new(projection);
+        let output_cols = read_columns_from_projection(&projection_input, metadata)?;
+        Self::new_with_read_columns(metadata, output_cols, read_column_ids)
     }
 
     /// Returns a new mapper with output projection and explicit read columns.
     pub fn new_with_read_columns(
         metadata: &RegionMetadataRef,
-        projection: Vec<usize>,
-        read_column_ids: Vec<ColumnId>,
+        output_cols: impl Into<ReadColumns>,
+        read_cols: impl Into<ReadColumns>,
     ) -> Result<Self> {
+        let output_cols = output_cols.into();
+        let read_cols = read_cols.into();
         // If the original projection is empty.
-        let is_empty_projection = projection.is_empty();
+        let is_empty_projection = output_cols.is_empty();
 
-        // Output column schemas for the projection.
-        let mut column_schemas = Vec::with_capacity(projection.len());
-        // Column ids of the output projection without deduplication.
-        let mut output_column_ids = Vec::with_capacity(projection.len());
-        for idx in &projection {
-            // For each projection index, we get the column id for projection.
-            let column =
-                metadata
-                    .column_metadatas
-                    .get(*idx)
-                    .with_context(|| InvalidRequestSnafu {
-                        region_id: metadata.region_id,
-                        reason: format!("projection index {} is out of bound", idx),
-                    })?;
-
-            output_column_ids.push(column.column_id);
-            // Safety: idx is valid.
-            column_schemas.push(metadata.schema.column_schemas()[*idx].clone());
+        let mut col_schemas = Vec::with_capacity(output_cols.columns().len());
+        for read_col in output_cols.columns() {
+            let col_id = read_col.column_id();
+            let col = metadata
+                .column_by_id(col_id)
+                .with_context(|| InvalidRequestSnafu {
+                    region_id: metadata.region_id,
+                    reason: format!("col id {} is invalid", col_id),
+                })?;
+            // TODO(fys): try use col.nested path to prune the column schema
+            // if it is a nested field.
+            let col_schema = col.column_schema.clone();
+            col_schemas.push(col_schema);
         }
 
         // Creates a map to lookup index.
         let id_to_index = sst_column_id_indices(metadata);
+
         // TODO(yingwen): Support different flat schema options.
         let format_projection = FormatProjection::compute_format_projection(
             &id_to_index,
             // All columns with internal columns.
             metadata.column_metadatas.len() + 3,
-            read_column_ids.iter().copied(),
+            &read_cols,
         );
 
         let batch_schema = flat_projected_columns(metadata, &format_projection);
@@ -129,23 +132,23 @@ impl FlatProjectionMapper {
             Arc::new(Schema::new(vec![]))
         } else {
             // Safety: Columns come from existing schema.
-            Arc::new(Schema::new(column_schemas))
+            Arc::new(Schema::new(col_schemas))
         };
 
         let batch_indices = if is_empty_projection {
             vec![]
         } else {
-            output_column_ids
-                .iter()
+            output_cols
+                .column_ids_iter()
                 .map(|id| {
                     // Safety: The map is computed from the read projection.
                     format_projection
                         .column_id_to_projected_index
-                        .get(id)
+                        .get(&id)
                         .copied()
                         .with_context(|| {
                             let name = metadata
-                                .column_by_id(*id)
+                                .column_by_id(id)
                                 .map(|column| column.column_schema.name.clone())
                                 .unwrap_or_else(|| id.to_string());
                             InvalidRequestSnafu {
@@ -163,7 +166,7 @@ impl FlatProjectionMapper {
         Ok(FlatProjectionMapper {
             metadata: metadata.clone(),
             output_schema,
-            read_column_ids,
+            read_cols,
             batch_schema,
             is_empty_projection,
             batch_indices,
@@ -181,10 +184,8 @@ impl FlatProjectionMapper {
         &self.metadata
     }
 
-    /// Returns ids of projected columns that we need to read
-    /// from memtables and SSTs.
-    pub(crate) fn column_ids(&self) -> &[ColumnId] {
-        &self.read_column_ids
+    pub(crate) fn read_columns(&self) -> &ReadColumns {
+        &self.read_cols
     }
 
     /// Returns the field column start index in output batch.
@@ -288,6 +289,29 @@ impl FlatProjectionMapper {
                     let casted = datatypes::arrow::compute::cast(&array, value_type)
                         .context(ArrowComputeSnafu)?;
                     array = casted;
+                }
+            }
+            // TODO(fys): remove this after we fix the schema mismatch issue.
+            else {
+                let target_schema = self.output_schema.arrow_schema();
+                if target_schema.field(output_idx).data_type()
+                    != batch.schema().field(*index).data_type()
+                {
+                    common_telemetry::info!(
+                        "Casting column {} from type {} to {} since the batch schema doesn't match the output schema",
+                        self.output_schema.column_schemas()[output_idx].name,
+                        batch.schema().field(*index).data_type(),
+                        target_schema.field(output_idx).data_type()
+                    );
+                    let source_col = batch.column(*index).clone();
+                    let target_field = self.output_schema.arrow_schema().field(output_idx);
+                    array =
+                        cast_column(&source_col, target_field, &CastOptions::default()).unwrap();
+                } else {
+                    common_telemetry::info!(
+                        "Skip casting column {} since the batch schema matches the output schema",
+                        self.output_schema.column_schemas()[output_idx].name
+                    );
                 }
             }
             arrays.push(array);
@@ -440,15 +464,15 @@ impl CompactionProjectionMapper {
             .chain([metadata.time_index_column_pos()])
             .collect::<Vec<_>>();
 
-        let mapper = FlatProjectionMapper::new_with_read_columns(
-            metadata,
-            projection,
-            metadata
-                .column_metadatas
-                .iter()
-                .map(|col| col.column_id)
-                .collect(),
-        )?;
+        let read_column_ids: Vec<_> = metadata
+            .column_metadatas
+            .iter()
+            .map(|col| col.column_id)
+            .collect();
+        let output_cols =
+            read_columns_from_projection(&ProjectionInput::new(projection), metadata)?;
+        let mapper =
+            FlatProjectionMapper::new_with_read_columns(metadata, output_cols, read_column_ids)?;
         let assembler = DfBatchAssembler::new(mapper.output_schema());
 
         Ok(Self { mapper, assembler })
