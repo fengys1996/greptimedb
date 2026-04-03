@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use api::v1::SemanticType;
 use common_recordbatch::filter::SimpleFilterEvaluator;
-use common_telemetry::{tracing, warn};
+use common_telemetry::{info, tracing, warn};
 use datafusion_expr::Expr;
 use datatypes::arrow::array::ArrayRef;
 use datatypes::arrow::datatypes::Field;
@@ -423,6 +423,7 @@ impl ParquetReaderBuilder {
         let parquet_schema_desc = parquet_meta.file_metadata().schema_descr();
         let parquet_projection = read_format.parquet_projection();
         let leaf_indices = build_parquet_leaves_indices(parquet_schema_desc, parquet_projection);
+        info!("leaf_indices: {:?}", leaf_indices);
         let projection_mask =
             ProjectionMask::leaves(parquet_schema_desc, leaf_indices.iter().copied());
         let selection = self

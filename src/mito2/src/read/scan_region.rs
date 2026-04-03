@@ -472,16 +472,22 @@ impl ScanRegion {
             if !memtable_range.intersects(&time_range) {
                 continue;
             }
-            let ranges_in_memtable = m.ranges(
-                Some(read_col_ids.as_slice()),
-                RangesOptions::default()
-                    .with_predicate(predicate.clone())
-                    .with_sequence(SequenceRange::new(
-                        self.request.memtable_min_sequence,
-                        self.request.memtable_max_sequence,
-                    ))
-                    .with_pre_filter_mode(filter_mode),
-            )?;
+            let mut ranges_options = RangesOptions::default()
+                .with_predicate(predicate.clone())
+                .with_sequence(SequenceRange::new(
+                    self.request.memtable_min_sequence,
+                    self.request.memtable_max_sequence,
+                ))
+                .with_pre_filter_mode(filter_mode);
+            if flat_format {
+                let nested_paths = projection_input
+                    .as_ref()
+                    .map(|input| input.nested_paths.clone())
+                    .unwrap_or_default();
+                ranges_options = ranges_options.with_nested_paths(nested_paths);
+            }
+            let ranges_in_memtable =
+                m.ranges(Some(read_col_ids.as_slice()), ranges_options)?;
             mem_range_builders.extend(ranges_in_memtable.ranges.into_values().map(|v| {
                 let stats = v.stats().clone();
                 MemRangeBuilder::new(v, stats)

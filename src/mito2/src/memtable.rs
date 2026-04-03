@@ -14,7 +14,7 @@
 
 //! Memtables are write buffers for regions.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -30,7 +30,7 @@ use mito_codec::row_converter::{PrimaryKeyCodec, build_primary_key_codec};
 use serde::{Deserialize, Serialize};
 use snafu::ensure;
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::{ColumnId, SequenceNumber, SequenceRange};
+use store_api::storage::{ColumnId, NestedPath, SequenceNumber, SequenceRange};
 
 use crate::config::MitoConfig;
 use crate::error::{Result, UnsupportedOperationSnafu};
@@ -90,6 +90,8 @@ pub struct RangesOptions {
     pub predicate: PredicateGroup,
     /// Sequence range to filter the data.
     pub sequence: Option<SequenceRange>,
+    /// Nested field access paths used for sub-field projection.
+    pub nested_paths: Vec<NestedPath>,
 }
 
 impl Default for RangesOptions {
@@ -99,6 +101,7 @@ impl Default for RangesOptions {
             pre_filter_mode: PreFilterMode::All,
             predicate: PredicateGroup::default(),
             sequence: None,
+            nested_paths: Vec::new(),
         }
     }
 }
@@ -111,6 +114,7 @@ impl RangesOptions {
             pre_filter_mode: PreFilterMode::All,
             predicate: PredicateGroup::default(),
             sequence: None,
+            nested_paths: Vec::new(),
         }
     }
 
@@ -118,6 +122,13 @@ impl RangesOptions {
     #[must_use]
     pub fn with_pre_filter_mode(mut self, pre_filter_mode: PreFilterMode) -> Self {
         self.pre_filter_mode = pre_filter_mode;
+        self
+    }
+
+    /// Sets nested field access paths for sub-field projection.
+    #[must_use]
+    pub fn with_nested_paths(mut self, nested_paths: Vec<NestedPath>) -> Self {
+        self.nested_paths = nested_paths;
         self
     }
 
@@ -584,13 +595,28 @@ pub struct BatchToRecordBatchContext {
     metadata: RegionMetadataRef,
     codec: Arc<dyn PrimaryKeyCodec>,
     read_column_ids: Vec<ColumnId>,
+    column_nested_paths: HashMap<ColumnId, Vec<NestedPath>>,
 }
 
 impl BatchToRecordBatchContext {
     /// Creates a new context for adapting batch iterators.
-    pub fn new(metadata: RegionMetadataRef, mut read_column_ids: Vec<ColumnId>) -> Self {
+    pub fn new(
+        metadata: RegionMetadataRef,
+        mut read_column_ids: Vec<ColumnId>,
+        nested_paths: Vec<NestedPath>,
+    ) -> Self {
         if read_column_ids.is_empty() {
             read_column_ids.push(metadata.time_index_column().column_id);
+        }
+
+        let mut column_nested_paths = HashMap::new();
+        if !nested_paths.is_empty() {
+            let paths_by_root = crate::read::flat_projection::nested_paths_by_root(&nested_paths);
+            for column in &metadata.column_metadatas {
+                if let Some(paths) = paths_by_root.get(&column.column_schema.name) {
+                    column_nested_paths.insert(column.column_id, paths.clone());
+                }
+            }
         }
 
         let codec = build_primary_key_codec(&metadata);
@@ -598,6 +624,7 @@ impl BatchToRecordBatchContext {
             metadata,
             codec,
             read_column_ids,
+            column_nested_paths,
         }
     }
 
@@ -607,6 +634,7 @@ impl BatchToRecordBatchContext {
             self.metadata.clone(),
             self.codec.clone(),
             &self.read_column_ids,
+            &self.column_nested_paths,
         ))
     }
 }

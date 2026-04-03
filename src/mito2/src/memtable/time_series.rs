@@ -289,6 +289,7 @@ impl Memtable for TimeSeriesMemtable {
         let batch_to_record_batch = Arc::new(BatchToRecordBatchContext::new(
             self.region_metadata.clone(),
             read_column_ids,
+            options.nested_paths.clone(),
         ));
         let builder = Box::new(TimeSeriesIterBuilder {
             series_set: self.series_set.clone(),
@@ -2051,6 +2052,7 @@ mod tests {
         let adapter_context = Arc::new(BatchToRecordBatchContext::new(
             schema.clone(),
             read_column_ids,
+            Vec::new(),
         ));
         TimeSeriesIterBuilder {
             series_set: memtable.series_set.clone(),

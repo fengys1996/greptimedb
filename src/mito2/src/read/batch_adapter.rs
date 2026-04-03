@@ -17,14 +17,18 @@
 //! produce [`Batch`] to feed into the flat read pipeline.
 
 use std::borrow::Cow;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use api::v1::SemanticType;
-use datatypes::arrow::array::{ArrayRef, BinaryArray, DictionaryArray, UInt32Array};
+use datatypes::arrow::array::{
+    Array, ArrayRef, BinaryArray, DictionaryArray, StructArray, UInt32Array,
+};
 use datatypes::arrow::datatypes::{Field, SchemaRef};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::{ConcreteDataType, DataType, Vector};
+use datatypes::types::JsonType;
+use datatypes::types::json_type::JsonNativeType;
 use mito_codec::row_converter::{CompositeValues, PrimaryKeyCodec};
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
@@ -35,15 +39,18 @@ use crate::error::{
 };
 use crate::memtable::BoxedBatchIterator;
 use crate::read::Batch;
+use crate::read::flat_projection::prune_column_type;
 use crate::sst::{internal_fields, tag_maybe_to_dictionary_field};
 
 /// Adapts a [`BoxedBatchIterator`] into an `Iterator<Item = Result<RecordBatch>>`
 /// producing flat-format record batches.
 pub struct BatchToRecordBatchAdapter {
     iter: BoxedBatchIterator,
+    metadata: RegionMetadataRef,
     codec: Arc<dyn PrimaryKeyCodec>,
     output_schema: SchemaRef,
     projected_pk: Vec<ProjectedPkColumn>,
+    column_nested_paths: HashMap<ColumnId, Vec<Vec<String>>>,
 }
 
 struct ProjectedPkColumn {
@@ -64,6 +71,7 @@ impl BatchToRecordBatchAdapter {
         metadata: RegionMetadataRef,
         codec: Arc<dyn PrimaryKeyCodec>,
         read_column_ids: &[ColumnId],
+        column_nested_paths: &HashMap<ColumnId, Vec<Vec<String>>>,
     ) -> Self {
         let read_column_id_set: HashSet<_> = read_column_ids.iter().copied().collect();
         let projected_pk = metadata
@@ -76,13 +84,16 @@ impl BatchToRecordBatchAdapter {
                 data_type: column_metadata.column_schema.data_type.clone(),
             })
             .collect();
-        let output_schema = compute_output_arrow_schema(&metadata, &read_column_id_set);
+        let output_schema =
+            compute_output_arrow_schema(&metadata, &read_column_id_set, column_nested_paths);
 
         Self {
             iter,
+            metadata,
             codec,
             output_schema,
             projected_pk,
+            column_nested_paths: column_nested_paths.clone(),
         }
     }
 
@@ -116,7 +127,23 @@ impl BatchToRecordBatchAdapter {
             }
         }
         for batch_col in batch.fields() {
-            columns.push(batch_col.data.to_arrow_array());
+            let array = batch_col.data.to_arrow_array();
+            let array = if let Some(nested_paths) = self.column_nested_paths.get(&batch_col.column_id)
+            {
+                if let Some(column) = self.metadata.column_by_id(batch_col.column_id) {
+                    prune_array_for_nested_paths(
+                        array.clone(),
+                        &column.column_schema.data_type,
+                        nested_paths,
+                    )
+                    .unwrap_or(array)
+                } else {
+                    array
+                }
+            } else {
+                array
+            };
+            columns.push(array);
         }
 
         columns.push(batch.timestamps().to_arrow_array());
@@ -205,6 +232,7 @@ fn build_string_tag_dict_array(
 fn compute_output_arrow_schema(
     metadata: &RegionMetadataRef,
     read_column_id_set: &HashSet<ColumnId>,
+    column_nested_paths: &HashMap<ColumnId, Vec<Vec<String>>>,
 ) -> SchemaRef {
     let mut fields = Vec::new();
 
@@ -212,13 +240,19 @@ fn compute_output_arrow_schema(
         if !read_column_id_set.contains(&column_metadata.column_id) {
             continue;
         }
+        let mut data_type = column_metadata.column_schema.data_type.clone();
+        if let Some(nested_paths) = column_nested_paths.get(&column_metadata.column_id) {
+            if let Some(pruned) = prune_column_type(&data_type, nested_paths) {
+                data_type = pruned;
+            }
+        }
         let field = Arc::new(Field::new(
             &column_metadata.column_schema.name,
-            column_metadata.column_schema.data_type.as_arrow_type(),
+            data_type.as_arrow_type(),
             column_metadata.column_schema.is_nullable(),
         ));
         let field = if column_metadata.semantic_type == SemanticType::Tag {
-            tag_maybe_to_dictionary_field(&column_metadata.column_schema.data_type, &field)
+            tag_maybe_to_dictionary_field(&data_type, &field)
         } else {
             field
         };
@@ -229,9 +263,15 @@ fn compute_output_arrow_schema(
         if !read_column_id_set.contains(&column_metadata.column_id) {
             continue;
         }
+        let mut data_type = column_metadata.column_schema.data_type.clone();
+        if let Some(nested_paths) = column_nested_paths.get(&column_metadata.column_id) {
+            if let Some(pruned) = prune_column_type(&data_type, nested_paths) {
+                data_type = pruned;
+            }
+        }
         let field = Arc::new(Field::new(
             &column_metadata.column_schema.name,
-            column_metadata.column_schema.data_type.as_arrow_type(),
+            data_type.as_arrow_type(),
             column_metadata.column_schema.is_nullable(),
         ));
         fields.push(field);
@@ -247,6 +287,124 @@ fn compute_output_arrow_schema(
     fields.extend(internal_fields().iter().cloned());
 
     Arc::new(datatypes::arrow::datatypes::Schema::new(fields))
+}
+
+#[derive(Default)]
+struct PathNode {
+    children: HashMap<String, PathNode>,
+    whole: bool,
+}
+
+impl PathNode {
+    fn insert(&mut self, path: &[Vec<String>]) {
+        for segs in path {
+            if segs.is_empty() {
+                self.whole = true;
+                self.children.clear();
+                return;
+            }
+            self.insert_one(segs);
+        }
+    }
+
+    fn insert_one(&mut self, path: &[String]) {
+        if path.is_empty() {
+            self.whole = true;
+            self.children.clear();
+            return;
+        }
+        let entry = self
+            .children
+            .entry(path[0].clone())
+            .or_insert_with(PathNode::default);
+        if entry.whole {
+            return;
+        }
+        if path.len() == 1 {
+            entry.whole = true;
+            entry.children.clear();
+        } else {
+            entry.insert_one(&path[1..]);
+        }
+    }
+}
+
+fn prune_array_for_nested_paths(
+    array: ArrayRef,
+    data_type: &ConcreteDataType,
+    nested_paths: &[Vec<String>],
+) -> Option<ArrayRef> {
+    if nested_paths.iter().any(|path| path.is_empty()) {
+        return None;
+    }
+
+    match data_type {
+        ConcreteDataType::Struct(_) => {
+            let mut node = PathNode::default();
+            node.insert(nested_paths);
+            let struct_array = array.as_any().downcast_ref::<StructArray>()?;
+            prune_struct_array(struct_array, &node).map(|array| Arc::new(array) as ArrayRef)
+        }
+        ConcreteDataType::Json(json_type) => prune_json_array(array, json_type, nested_paths),
+        _ => None,
+    }
+}
+
+fn prune_json_array(
+    array: ArrayRef,
+    json_type: &JsonType,
+    nested_paths: &[Vec<String>],
+) -> Option<ArrayRef> {
+    if !json_type.is_native_type() {
+        return None;
+    }
+    if !matches!(json_type.native_type(), JsonNativeType::Object(_)) {
+        return None;
+    }
+    let mut node = PathNode::default();
+    node.insert(nested_paths);
+    let struct_array = array.as_any().downcast_ref::<StructArray>()?;
+    prune_struct_array(struct_array, &node).map(|array| Arc::new(array) as ArrayRef)
+}
+
+fn prune_struct_array(array: &StructArray, node: &PathNode) -> Option<StructArray> {
+    if node.children.is_empty() {
+        return Some(array.clone());
+    }
+
+    let mut fields = Vec::new();
+    let mut columns = Vec::new();
+    let mut matched = false;
+
+    for (field, column) in array.fields().iter().zip(array.columns()) {
+        let Some(child) = node.children.get(field.name()) else {
+            continue;
+        };
+        if child.whole {
+            fields.push(field.clone());
+            columns.push(column.clone());
+            matched = true;
+            continue;
+        }
+        let Some(struct_array) = column.as_any().downcast_ref::<StructArray>() else {
+            continue;
+        };
+        if let Some(pruned) = prune_struct_array(struct_array, child) {
+            let mut new_field = Field::new(
+                field.name(),
+                pruned.data_type().clone(),
+                field.is_nullable(),
+            );
+            if !field.metadata().is_empty() {
+                new_field = new_field.with_metadata(field.metadata().clone());
+            }
+            fields.push(Arc::new(new_field));
+            columns.push(Arc::new(pruned));
+            matched = true;
+        }
+    }
+
+    matched.then(|| StructArray::new(fields.into(), columns, array.nulls().cloned()))
 }
 
 #[cfg(test)]
@@ -285,6 +443,7 @@ mod tests {
             Arc::clone(metadata),
             Arc::clone(codec),
             &read_column_ids,
+            &HashMap::new(),
         )
     }
 

@@ -195,6 +195,7 @@ impl Memtable for PartitionTreeMemtable {
         let adapter_context = Arc::new(BatchToRecordBatchContext::new(
             self.tree.metadata.clone(),
             read_column_ids,
+            options.nested_paths.clone(),
         ));
         let context = Arc::new(MemtableRangeContext::new_with_batch_to_record_batch(
             self.id,

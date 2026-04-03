@@ -14,21 +14,24 @@
 
 //! Utilities for projection on flat format.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::v1::SemanticType;
 use common_error::ext::BoxedError;
 use common_recordbatch::error::{ArrowComputeSnafu, ExternalSnafu, NewDfRecordBatchSnafu};
 use common_recordbatch::{DfRecordBatch, RecordBatch};
-use datatypes::arrow::array::Array;
+use datatypes::arrow::array::{Array, StructArray};
 use datatypes::arrow::datatypes::{DataType as ArrowDataType, Field};
 use datatypes::prelude::{ConcreteDataType, DataType};
 use datatypes::schema::{Schema, SchemaRef};
+use datatypes::types::json_type::{JsonNativeType, JsonObjectType};
+use datatypes::types::{JsonFormat, JsonType, StructField, StructType};
 use datatypes::value::Value;
 use datatypes::vectors::Helper;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
-use store_api::storage::{ColumnId, ProjectionInput};
+use store_api::storage::{ColumnId, NestedPath, ProjectionInput};
 
 use crate::cache::CacheStrategy;
 use crate::error::{InvalidRequestSnafu, RecordBatchSnafu, Result};
@@ -63,6 +66,10 @@ pub struct FlatProjectionMapper {
     is_empty_projection: bool,
     /// The index in flat format [RecordBatch] for each column in the output [RecordBatch].
     batch_indices: Vec<usize>,
+    /// Column ids in output schema order.
+    output_column_ids: Vec<ColumnId>,
+    /// Nested paths per column id.
+    column_nested_paths: HashMap<ColumnId, Vec<Vec<String>>>,
     /// Precomputed Arrow schema for input batches.
     input_arrow_schema: datatypes::arrow::datatypes::SchemaRef,
 }
@@ -96,6 +103,8 @@ impl FlatProjectionMapper {
         let mut column_schemas = Vec::with_capacity(projection.len());
         // Column ids of the output projection without deduplication.
         let mut output_column_ids = Vec::with_capacity(projection.len());
+        let nested_paths_by_root = nested_paths_by_root(&projection_input.nested_paths);
+        let mut column_nested_paths = HashMap::new();
         for idx in &projection {
             // For each projection index, we get the column id for projection.
             let column =
@@ -109,7 +118,14 @@ impl FlatProjectionMapper {
 
             output_column_ids.push(column.column_id);
             // Safety: idx is valid.
-            column_schemas.push(metadata.schema.column_schemas()[*idx].clone());
+            let mut column_schema = metadata.schema.column_schemas()[*idx].clone();
+            if let Some(nested_paths) = nested_paths_by_root.get(&column_schema.name) {
+                column_nested_paths.insert(column.column_id, nested_paths.clone());
+                if let Some(data_type) = prune_column_type(&column_schema.data_type, nested_paths) {
+                    column_schema.data_type = data_type;
+                }
+            }
+            column_schemas.push(column_schema);
         }
 
         // Creates a map to lookup index.
@@ -172,6 +188,8 @@ impl FlatProjectionMapper {
             batch_schema,
             is_empty_projection,
             batch_indices,
+            output_column_ids,
+            column_nested_paths,
             input_arrow_schema,
         })
     }
@@ -264,6 +282,8 @@ impl FlatProjectionMapper {
         let mut arrays = Vec::with_capacity(self.output_schema.num_columns());
         for (output_idx, index) in self.batch_indices.iter().enumerate() {
             let mut array = batch.column(*index).clone();
+            // let field = batch.schema().field(*index).clone();
+            // let field = self.metadata.schema.arrow_schema().field(*index).clone();
             // Cast dictionary values to the target type.
             if let ArrowDataType::Dictionary(_key_type, value_type) = array.data_type() {
                 // When a string dictionary column contains only a single value, reuse a cached
@@ -288,9 +308,24 @@ impl FlatProjectionMapper {
                     )?;
                     array = repeated.to_arrow_array();
                 } else {
+                    // common_telemetry::info!("cast field: {:?}", field);
+                    // let casted = cast_column(&array, &field, &CastOptions::default()).unwrap();
                     let casted = datatypes::arrow::compute::cast(&array, value_type)
                         .context(ArrowComputeSnafu)?;
                     array = casted;
+                }
+            }
+            // common_telemetry::info!("cast field: {:?}", field);
+            // let casted = cast_column(&array, &field, &CastOptions::default()).unwrap();
+            // array = casted;
+            let column_id = self.output_column_ids[output_idx];
+            if let Some(nested_paths) = self.column_nested_paths.get(&column_id) {
+                if let Some(column) = self.metadata.column_by_id(column_id) {
+                    if let Some(pruned) =
+                        prune_array_for_nested_paths(array.clone(), &column.column_schema.data_type, nested_paths)
+                    {
+                        array = pruned;
+                    }
                 }
             }
             arrays.push(array);
@@ -311,7 +346,7 @@ impl FlatProjectionMapper {
         batch: &datatypes::arrow::record_batch::RecordBatch,
     ) -> common_recordbatch::error::Result<Vec<datatypes::vectors::VectorRef>> {
         let mut columns = Vec::with_capacity(self.output_schema.num_columns());
-        for index in &self.batch_indices {
+        for (output_idx, index) in self.batch_indices.iter().enumerate() {
             let mut array = batch.column(*index).clone();
             // Casts dictionary values to the target type.
             if let datatypes::arrow::datatypes::DataType::Dictionary(_key_type, value_type) =
@@ -321,6 +356,16 @@ impl FlatProjectionMapper {
                     .context(ArrowComputeSnafu)?;
                 array = casted;
             }
+            let column_id = self.output_column_ids[output_idx];
+            if let Some(nested_paths) = self.column_nested_paths.get(&column_id) {
+                if let Some(column) = self.metadata.column_by_id(column_id) {
+                    if let Some(pruned) =
+                        prune_array_for_nested_paths(array.clone(), &column.column_schema.data_type, nested_paths)
+                    {
+                        array = pruned;
+                    }
+                }
+            }
             let vector = Helper::try_into_vector(array)
                 .map_err(BoxedError::new)
                 .context(ExternalSnafu)?;
@@ -328,6 +373,268 @@ impl FlatProjectionMapper {
         }
         Ok(columns)
     }
+}
+
+#[derive(Default)]
+struct PathNode {
+    children: HashMap<String, PathNode>,
+    whole: bool,
+}
+
+impl PathNode {
+    fn insert(&mut self, path: &[String]) {
+        if path.is_empty() {
+            self.whole = true;
+            self.children.clear();
+            return;
+        }
+
+        let entry = self
+            .children
+            .entry(path[0].clone())
+            .or_insert_with(PathNode::default);
+        if entry.whole {
+            return;
+        }
+        if path.len() == 1 {
+            entry.whole = true;
+            entry.children.clear();
+        } else {
+            entry.insert(&path[1..]);
+        }
+    }
+}
+
+pub(crate) fn nested_paths_by_root(
+    nested_paths: &[NestedPath],
+) -> HashMap<String, Vec<Vec<String>>> {
+    let mut map = HashMap::new();
+    for path in nested_paths {
+        let Some((root, rest)) = path.split_first() else {
+            continue;
+        };
+        map.entry(root.clone())
+            .or_insert_with(Vec::new)
+            .push(rest.to_vec());
+    }
+    map
+}
+
+pub(crate) fn prune_column_type(
+    data_type: &ConcreteDataType,
+    nested_paths: &[Vec<String>],
+) -> Option<ConcreteDataType> {
+    if nested_paths.iter().any(|path| path.is_empty()) {
+        return None;
+    }
+
+    match data_type {
+        ConcreteDataType::Struct(struct_type) => {
+            prune_struct_type(struct_type, nested_paths).map(ConcreteDataType::Struct)
+        }
+        ConcreteDataType::Json(json_type) => prune_json_type(json_type, nested_paths),
+        _ => None,
+    }
+}
+
+fn prune_struct_type(struct_type: &StructType, nested_paths: &[Vec<String>]) -> Option<StructType> {
+    let mut root = PathNode::default();
+    for path in nested_paths {
+        root.insert(path);
+    }
+    prune_struct_type_with_node(struct_type, &root)
+}
+
+fn prune_struct_type_with_node(struct_type: &StructType, node: &PathNode) -> Option<StructType> {
+    let mut fields = Vec::new();
+    let mut matched = false;
+
+    for field in struct_type.fields().iter() {
+        let Some(child) = node.children.get(field.name()) else {
+            continue;
+        };
+        if child.whole {
+            fields.push(field.clone());
+            matched = true;
+            continue;
+        }
+        if let Some(pruned) = prune_data_type(field.data_type(), child) {
+            fields.push(StructField::new(
+                field.name().to_string(),
+                pruned,
+                field.is_nullable(),
+            ));
+            matched = true;
+        }
+    }
+
+    if matched {
+        Some(StructType::new(Arc::new(fields)))
+    } else {
+        None
+    }
+}
+
+fn prune_json_type(json_type: &JsonType, nested_paths: &[Vec<String>]) -> Option<ConcreteDataType> {
+    if !json_type.is_native_type() {
+        return None;
+    }
+
+    let JsonNativeType::Object(object) = json_type.native_type() else {
+        return None;
+    };
+
+    let mut root = PathNode::default();
+    for path in nested_paths {
+        root.insert(path);
+    }
+
+    prune_json_object(object, &root).map(|object| {
+        ConcreteDataType::Json(JsonType::new(JsonFormat::Native(Box::new(
+            JsonNativeType::Object(object),
+        ))))
+    })
+}
+
+fn prune_data_type(data_type: &ConcreteDataType, node: &PathNode) -> Option<ConcreteDataType> {
+    if node.children.is_empty() {
+        return Some(data_type.clone());
+    }
+
+    match data_type {
+        ConcreteDataType::Struct(struct_type) => {
+            prune_struct_type_with_node(struct_type, node).map(ConcreteDataType::Struct)
+        }
+        ConcreteDataType::Json(json_type) => prune_json_type_with_node(json_type, node),
+        _ => None,
+    }
+}
+
+fn prune_json_type_with_node(json_type: &JsonType, node: &PathNode) -> Option<ConcreteDataType> {
+    if !json_type.is_native_type() {
+        return None;
+    }
+
+    let JsonNativeType::Object(object) = json_type.native_type() else {
+        return None;
+    };
+
+    prune_json_object(object, node).map(|object| {
+        ConcreteDataType::Json(JsonType::new(JsonFormat::Native(Box::new(
+            JsonNativeType::Object(object),
+        ))))
+    })
+}
+
+fn prune_json_object(object: &JsonObjectType, node: &PathNode) -> Option<JsonObjectType> {
+    let mut pruned = JsonObjectType::new();
+    let mut matched = false;
+
+    for (name, value_type) in object.iter() {
+        let Some(child) = node.children.get(name) else {
+            continue;
+        };
+        if child.whole {
+            pruned.insert(name.clone(), value_type.clone());
+            matched = true;
+            continue;
+        }
+        if let Some(pruned_type) = prune_json_native_type(value_type, child) {
+            pruned.insert(name.clone(), pruned_type);
+            matched = true;
+        }
+    }
+
+    if matched { Some(pruned) } else { None }
+}
+
+fn prune_json_native_type(data_type: &JsonNativeType, node: &PathNode) -> Option<JsonNativeType> {
+    if node.children.is_empty() {
+        return Some(data_type.clone());
+    }
+
+    match data_type {
+        JsonNativeType::Object(object) => {
+            prune_json_object(object, node).map(JsonNativeType::Object)
+        }
+        _ => None,
+    }
+}
+
+fn prune_array_for_nested_paths(
+    array: Arc<dyn Array>,
+    data_type: &ConcreteDataType,
+    nested_paths: &[Vec<String>],
+) -> Option<Arc<dyn Array>> {
+    if nested_paths.iter().any(|path| path.is_empty()) {
+        return None;
+    }
+
+    match data_type {
+        ConcreteDataType::Struct(_) => {
+            let struct_array = array.as_any().downcast_ref::<StructArray>()?;
+            let mut node = PathNode::default();
+            for path in nested_paths {
+                node.insert(path);
+            }
+            prune_struct_array(struct_array, &node).map(|array| Arc::new(array) as Arc<dyn Array>)
+        }
+        ConcreteDataType::Json(json_type) => {
+            if !json_type.is_native_type() {
+                return None;
+            }
+            if !matches!(json_type.native_type(), JsonNativeType::Object(_)) {
+                return None;
+            }
+            let struct_array = array.as_any().downcast_ref::<StructArray>()?;
+            let mut node = PathNode::default();
+            for path in nested_paths {
+                node.insert(path);
+            }
+            prune_struct_array(struct_array, &node).map(|array| Arc::new(array) as Arc<dyn Array>)
+        }
+        _ => None,
+    }
+}
+
+fn prune_struct_array(array: &StructArray, node: &PathNode) -> Option<StructArray> {
+    if node.children.is_empty() {
+        return Some(array.clone());
+    }
+
+    let mut fields = Vec::new();
+    let mut columns = Vec::new();
+    let mut matched = false;
+
+    for (field, column) in array.fields().iter().zip(array.columns()) {
+        let Some(child) = node.children.get(field.name()) else {
+            continue;
+        };
+        if child.whole {
+            fields.push(field.clone());
+            columns.push(column.clone());
+            matched = true;
+            continue;
+        }
+        let Some(struct_array) = column.as_any().downcast_ref::<StructArray>() else {
+            continue;
+        };
+        if let Some(pruned) = prune_struct_array(struct_array, child) {
+            let mut new_field = Field::new(
+                field.name(),
+                pruned.data_type().clone(),
+                field.is_nullable(),
+            );
+            if !field.metadata().is_empty() {
+                new_field = new_field.with_metadata(field.metadata().clone());
+            }
+            fields.push(Arc::new(new_field));
+            columns.push(Arc::new(pruned));
+            matched = true;
+        }
+    }
+
+    matched.then(|| StructArray::new(fields.into(), columns, array.nulls().cloned()))
 }
 
 fn single_value_string_dictionary<'a>(

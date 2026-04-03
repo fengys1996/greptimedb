@@ -244,6 +244,7 @@ impl Memtable for SimpleBulkMemtable {
         let batch_to_record_batch = Arc::new(BatchToRecordBatchContext::new(
             self.region_metadata.clone(),
             read_column_ids.clone(),
+            options.nested_paths.clone(),
         ));
 
         let contexts = values
