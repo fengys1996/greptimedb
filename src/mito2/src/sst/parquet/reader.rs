@@ -79,7 +79,7 @@ use crate::sst::parquet::metadata::MetadataLoader;
 use crate::sst::parquet::prefilter::{
     PrefilterContextBuilder, execute_prefilter, is_usable_primary_key_filter,
 };
-use crate::sst::parquet::read_columns::{ParquetReadColumns, build_parquet_leaves_indices};
+use crate::sst::parquet::read_columns::build_parquet_leaves_indices;
 use crate::sst::parquet::row_group::ParquetFetchMetrics;
 use crate::sst::parquet::row_selection::RowGroupSelection;
 use crate::sst::parquet::stats::RowGroupPruningStats;
@@ -371,32 +371,23 @@ impl ParquetReaderBuilder {
             None
         };
 
-        let mut read_format = if let Some(column_ids) = &self.projection {
-            ReadFormat::new(
-                region_meta.clone(),
-                Some(column_ids),
-                true, // Always reads as flat format.
-                Some(parquet_meta.file_metadata().schema_descr().num_columns()),
-                &file_path,
-                skip_auto_convert,
-            )?
-        } else {
+        let expected_meta = self.expected_metadata.as_ref().unwrap_or(&region_meta);
+        let column_ids: Vec<_> = self.projection.as_ref().cloned().unwrap_or_else(|| {
             // Lists all column ids to read, we always use the expected metadata if possible.
-            let expected_meta = self.expected_metadata.as_ref().unwrap_or(&region_meta);
-            let column_ids: Vec<_> = expected_meta
+            expected_meta
                 .column_metadatas
                 .iter()
                 .map(|col| col.column_id)
-                .collect();
-            ReadFormat::new(
-                region_meta.clone(),
-                Some(&column_ids),
-                true, // Always reads as flat format.
-                Some(parquet_meta.file_metadata().schema_descr().num_columns()),
-                &file_path,
-                skip_auto_convert,
-            )?
-        };
+                .collect()
+        });
+        let mut read_format = ReadFormat::new(
+            region_meta.clone(),
+            Some(&column_ids),
+            true, // Always reads as flat format.
+            Some(parquet_meta.file_metadata().schema_descr().num_columns()),
+            &file_path,
+            skip_auto_convert,
+        )?;
         if self.decode_primary_key_values {
             read_format.set_decode_primary_key_values(true);
         }
@@ -407,10 +398,8 @@ impl ParquetReaderBuilder {
 
         // Computes the projection mask.
         let parquet_schema_desc = parquet_meta.file_metadata().schema_descr();
-        let parquet_projection = ParquetReadColumns::from_deduped_root_indices(
-            read_format.projection_indices().iter().copied(),
-        );
-        let leaf_indices = build_parquet_leaves_indices(parquet_schema_desc, &parquet_projection);
+        let parquet_read_cols = read_format.parquet_read_columns();
+        let leaf_indices = build_parquet_leaves_indices(parquet_schema_desc, &parquet_read_cols);
         let projection_mask =
             ProjectionMask::leaves(parquet_schema_desc, leaf_indices.iter().copied());
         let selection = self

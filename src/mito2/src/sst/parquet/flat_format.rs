@@ -55,6 +55,7 @@ use crate::sst::parquet::format::{
     FIXED_POS_COLUMN_NUM, FormatProjection, INTERNAL_COLUMN_NUM, PrimaryKeyArray,
     PrimaryKeyReadFormat, ReadFormat, StatValues,
 };
+use crate::sst::parquet::read_columns::ParquetReadColumns;
 use crate::sst::{
     FlatSchemaOptions, flat_sst_arrow_schema_column_num, tag_maybe_to_dictionary_field,
     to_flat_sst_arrow_schema,
@@ -268,6 +269,14 @@ impl FlatReadFormat {
         match &self.parquet_adapter {
             ParquetAdapter::Flat(p) => &p.format_projection.projection_indices,
             ParquetAdapter::PrimaryKeyToFlat(p) => p.format.projection_indices(),
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn parquet_read_columns(&self) -> ParquetReadColumns {
+        match &self.parquet_adapter {
+            ParquetAdapter::Flat(_p) => todo!(),
+            ParquetAdapter::PrimaryKeyToFlat(p) => p.format.parquet_read_columns(),
         }
     }
 
