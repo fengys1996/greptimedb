@@ -1233,6 +1233,8 @@ pub(crate) fn scan_flat_mem_ranges(
             part_metrics.inc_build_reader_cost(build_reader_start.elapsed());
 
             while let Some(record_batch) = iter.next().transpose()? {
+                let schema = record_batch.schema();
+                common_telemetry::info!("schema: {:?}", schema);
                 yield record_batch;
             }
 

@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::{fmt, mem};
 
 use arrow::datatypes::Field;
@@ -30,6 +31,8 @@ use crate::error::{
 };
 use crate::schema::TYPE_KEY;
 use crate::schema::constraint::ColumnDefaultConstraint;
+use crate::types::{JsonFormat, JsonType, ListType, StructField, StructType};
+use crate::types::json_type::JsonNativeType;
 use crate::value::Value;
 use crate::vectors::VectorRef;
 
@@ -113,6 +116,25 @@ impl fmt::Debug for ColumnSchema {
 }
 
 impl ColumnSchema {
+    pub fn purge(&self, nested_path: Vec<Vec<String>>) -> ColumnSchema {
+        if nested_path.is_empty() {
+            return self.clone();
+        }
+
+        let mut relative_paths = Vec::with_capacity(nested_path.len());
+        for path in nested_path {
+            if path.len() <= 1 {
+                // Selecting the root column means no pruning.
+                return self.clone();
+            }
+            relative_paths.push(path.into_iter().skip(1).collect());
+        }
+
+        let mut new_schema = self.clone();
+        new_schema.data_type = purge_concrete_data_type(&self.data_type, &relative_paths);
+        new_schema
+    }
+
     pub fn new<T: Into<String>>(
         name: T,
         data_type: ConcreteDataType,
@@ -504,6 +526,117 @@ impl ColumnSchema {
     pub fn is_indexed(&self) -> bool {
         self.is_inverted_indexed() || self.is_fulltext_indexed() || self.is_skipping_indexed()
     }
+}
+
+fn purge_concrete_data_type(
+    data_type: &ConcreteDataType,
+    nested_paths: &[Vec<String>],
+) -> ConcreteDataType {
+    if nested_paths.is_empty() {
+        return data_type.clone();
+    }
+
+    match data_type {
+        ConcreteDataType::Struct(struct_type) => {
+            ConcreteDataType::Struct(purge_struct_type(struct_type, nested_paths))
+        }
+        ConcreteDataType::Json(json_type) => match &json_type.format {
+            JsonFormat::Native(native) => {
+                let pruned = purge_json_native_type(native.as_ref(), nested_paths);
+                ConcreteDataType::Json(JsonType::new(JsonFormat::Native(Box::new(pruned))))
+            }
+            JsonFormat::Jsonb => data_type.clone(),
+        },
+        ConcreteDataType::List(list_type) => {
+            let pruned_item = purge_concrete_data_type(list_type.item_type(), nested_paths);
+            ConcreteDataType::List(ListType::new(Arc::new(pruned_item)))
+        }
+        _ => data_type.clone(),
+    }
+}
+
+fn purge_struct_type(struct_type: &StructType, nested_paths: &[Vec<String>]) -> StructType {
+    let grouped = group_nested_paths(nested_paths);
+    if grouped.is_empty() {
+        return struct_type.clone();
+    }
+
+    let mut new_fields = Vec::new();
+    for field in struct_type.fields().iter() {
+        let Some(paths) = grouped.get(field.name()) else {
+            continue;
+        };
+
+        if paths.iter().any(|path| path.is_empty()) {
+            new_fields.push(field.clone());
+            continue;
+        }
+
+        let pruned_type = purge_concrete_data_type(field.data_type(), paths);
+        new_fields.push(clone_struct_field_with_type(field, pruned_type));
+    }
+
+    StructType::new(Arc::new(new_fields))
+}
+
+fn purge_json_native_type(
+    native: &JsonNativeType,
+    nested_paths: &[Vec<String>],
+) -> JsonNativeType {
+    if nested_paths.is_empty() {
+        return native.clone();
+    }
+
+    match native {
+        JsonNativeType::Object(object) => {
+            let grouped = group_nested_paths(nested_paths);
+            if grouped.is_empty() {
+                return native.clone();
+            }
+
+            let mut new_object = object.clone();
+            new_object.retain(|key, value| {
+                let Some(paths) = grouped.get(key) else {
+                    return false;
+                };
+                if paths.iter().any(|path| path.is_empty()) {
+                    return true;
+                }
+                *value = purge_json_native_type(value, paths);
+                true
+            });
+            JsonNativeType::Object(new_object)
+        }
+        JsonNativeType::Array(item) => {
+            if nested_paths.iter().any(|path| path.is_empty()) {
+                return native.clone();
+            }
+            JsonNativeType::Array(Box::new(purge_json_native_type(item.as_ref(), nested_paths)))
+        }
+        _ => native.clone(),
+    }
+}
+
+fn group_nested_paths(nested_paths: &[Vec<String>]) -> HashMap<String, Vec<Vec<String>>> {
+    let mut grouped: HashMap<String, Vec<Vec<String>>> = HashMap::new();
+    for path in nested_paths {
+        let Some((head, tail)) = path.split_first() else {
+            continue;
+        };
+        grouped
+            .entry(head.clone())
+            .or_default()
+            .push(tail.to_vec());
+    }
+    grouped
+}
+
+fn clone_struct_field_with_type(field: &StructField, data_type: ConcreteDataType) -> StructField {
+    let mut new_field = StructField::new(field.name().to_string(), data_type, field.is_nullable());
+    for (key, value) in field.to_df_field().metadata() {
+        new_field.insert_metadata(key, value);
+    }
+    new_field
 }
 
 fn metadata_size(metadata: &Metadata) -> usize {

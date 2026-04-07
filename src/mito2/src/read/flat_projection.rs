@@ -36,7 +36,7 @@ use crate::read::projection::{
     ReadColumns, build_read_columns, read_column_ids_from_projection, repeated_vector_with_cache,
 };
 use crate::sst::parquet::flat_format::sst_column_id_indices;
-use crate::sst::parquet::format::FormatProjection;
+use crate::sst::parquet::format::{FormatProjection, purge_cols};
 use crate::sst::{
     FlatSchemaOptions, internal_fields, tag_maybe_to_dictionary_field, to_flat_sst_arrow_schema,
 };
@@ -109,8 +109,6 @@ impl FlatProjectionMapper {
 
             output_column_ids.push(column.column_id);
             // Safety: idx is valid.
-
-            // TODO: purge column schema by nested path;
             column_schemas.push(metadata.schema.column_schemas()[*idx].clone());
         }
 
@@ -130,6 +128,9 @@ impl FlatProjectionMapper {
 
         // Safety: We get the column id from the metadata.
         let input_arrow_schema = compute_input_arrow_schema(metadata, &batch_schema);
+
+        // TODO: purge column schema by nested path;
+        let column_schemas = purge_cols(column_schemas, format_projection.parquet_projection);
 
         // If projection is empty, we don't output any column.
         let output_schema = if is_empty_projection {

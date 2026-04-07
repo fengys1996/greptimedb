@@ -39,6 +39,7 @@ use datatypes::arrow::array::{
 use datatypes::arrow::datatypes::{SchemaRef, UInt32Type};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::DataType;
+use datatypes::schema::ColumnSchema;
 use datatypes::vectors::Helper;
 use mito_codec::row_converter::{
     CompositeValues, PrimaryKeyCodec, SortField, build_primary_key_codec,
@@ -1082,6 +1083,32 @@ pub(crate) fn need_override_sequence(parquet_meta: &ParquetMetaData) -> bool {
 
     // All row groups have sequence min-max of 0, or there are no row groups
     !parquet_meta.row_groups().is_empty()
+}
+
+pub fn purge_cols(
+    column_scheams: Vec<ColumnSchema>,
+    parquet_projection: ParquetProjection,
+) -> Vec<ColumnSchema> {
+    let mut ss: HashMap<String, Vec<Vec<String>>> = HashMap::new();
+    for col in parquet_projection.cols {
+        if !col.nested_paths.is_empty() {
+            let name = col.nested_paths[0][0].clone();
+            let nested_path = col.nested_paths;
+            ss.insert(name, nested_path);
+        }
+    }
+
+    let mut ret = vec![];
+    for column_schema in column_scheams {
+        let root_name = column_schema.name.clone();
+        let column_schema = if let Some(nested_path) = ss.get(&root_name) {
+            column_schema.purge(nested_path.to_vec())
+        } else {
+            column_schema
+        };
+        ret.push(column_schema);
+    }
+    ret
 }
 
 #[cfg(test)]
