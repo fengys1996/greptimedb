@@ -390,12 +390,7 @@ impl ScanRegion {
         let time_range = self.build_time_range_predicate();
         let predicate = PredicateGroup::new(&self.version.metadata, &self.request.filters)?;
 
-        let read_column_ids = match self
-            .request
-            .projection_input
-            .as_ref()
-            .map(|p| &p.projection)
-        {
+        let read_column_ids = match self.request.projection_indices() {
             Some(p) => self.build_read_column_ids(p, &predicate)?,
             None => self
                 .version
@@ -407,12 +402,7 @@ impl ScanRegion {
         };
 
         // The mapper always computes projected column ids as the schema of SSTs may change.
-        let mapper = match self
-            .request
-            .projection_input
-            .as_ref()
-            .map(|p| &p.projection)
-        {
+        let mapper = match self.request.projection_indices() {
             Some(p) => ProjectionMapper::new_with_read_columns(
                 &self.version.metadata,
                 p.iter().copied(),
@@ -1905,12 +1895,7 @@ mod tests {
         );
         let predicate =
             PredicateGroup::new(metadata.as_ref(), &scan_region.request.filters).unwrap();
-        let projection = &scan_region
-            .request
-            .projection_input
-            .as_ref()
-            .unwrap()
-            .projection;
+        let projection = &scan_region.request.projection_indices().unwrap();
         let read_ids = scan_region
             .build_read_column_ids(projection, &predicate)
             .unwrap();
@@ -1934,12 +1919,7 @@ mod tests {
         );
         let predicate =
             PredicateGroup::new(metadata.as_ref(), &scan_region.request.filters).unwrap();
-        let projection = &scan_region
-            .request
-            .projection_input
-            .as_ref()
-            .unwrap()
-            .projection;
+        let projection = &scan_region.request.projection_indices().unwrap();
         let read_ids = scan_region
             .build_read_column_ids(projection, &predicate)
             .unwrap();
@@ -1965,12 +1945,7 @@ mod tests {
         );
         let predicate =
             PredicateGroup::new(metadata.as_ref(), &scan_region.request.filters).unwrap();
-        let projection = &scan_region
-            .request
-            .projection_input
-            .as_ref()
-            .unwrap()
-            .projection;
+        let projection = &scan_region.request.projection_indices().unwrap();
         let read_ids = scan_region
             .build_read_column_ids(projection, &predicate)
             .unwrap();
