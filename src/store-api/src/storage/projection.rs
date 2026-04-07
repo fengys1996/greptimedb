@@ -68,7 +68,7 @@ impl Display for ProjectionInput {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "ProjectionInput {{ projection: {:?}, nested_paths: {:?} }}",
+            "ProjectionInput {{ projection: {:?}, nested paths: {:?} }}",
             self.projection, self.nested_paths
         )
     }

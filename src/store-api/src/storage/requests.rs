@@ -256,7 +256,7 @@ mod tests {
         };
         assert_eq!(
             request.to_string(),
-            r#"ScanRequest { projection: ProjectionInput { projection: [1, 2], nested_paths: [] }, filters: [i > Int32(1), s = Utf8(\"x\")], limit: 10 }"#
+            r#"ScanRequest { projection: ProjectionInput { projection: [1, 2], nested paths: [] }, filters: [i > Int32(1), s = Utf8(\"x\")], limit: 10 }"#
         );
 
         let request = ScanRequest {
