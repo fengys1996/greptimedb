@@ -15,9 +15,7 @@
 use std::collections::HashMap;
 
 use parquet::schema::types::SchemaDescriptor;
-
-/// A nested field access path inside one parquet root column.
-pub type ParquetNestedPath = Vec<String>;
+use store_api::storage::NestedPath;
 
 /// The parquet columns to read.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,7 +62,7 @@ pub struct ParquetReadColumn {
     /// column `j`, path `["j", "a", "b"]` refers to `j.a.b`.
     ///
     /// If empty, the whole root column is read.
-    nested_paths: Vec<ParquetNestedPath>,
+    nested_paths: Vec<NestedPath>,
 }
 
 impl ParquetReadColumn {
@@ -75,7 +73,7 @@ impl ParquetReadColumn {
         }
     }
 
-    pub fn with_nested_paths(self, nested_paths: Vec<ParquetNestedPath>) -> Self {
+    pub fn with_nested_paths(self, nested_paths: Vec<NestedPath>) -> Self {
         Self {
             nested_paths,
             ..self
@@ -86,7 +84,7 @@ impl ParquetReadColumn {
         self.root_index
     }
 
-    pub fn nested_paths(&self) -> &[ParquetNestedPath] {
+    pub fn nested_paths(&self) -> &[NestedPath] {
         &self.nested_paths
     }
 }
