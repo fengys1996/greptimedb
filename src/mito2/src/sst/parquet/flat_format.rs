@@ -265,6 +265,7 @@ impl FlatReadFormat {
         }
     }
 
+    /// Get the sorted read columns to read from the sst file.
     pub(crate) fn parquet_read_columns(&self) -> &ParquetReadColumns {
         match &self.parquet_adapter {
             ParquetAdapter::Flat(p) => &p.format_projection.parquet_read_cols,
