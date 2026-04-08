@@ -392,7 +392,26 @@ impl ScanRegion {
         let predicate = PredicateGroup::new(&self.version.metadata, &self.request.filters)?;
 
         let read_column_ids = match self.request.projection_indices() {
-            Some(p) => self.build_read_column_ids(p, &predicate)?,
+            Some(p) =>
+            // FIXME(fys): `build_read_column_ids()` only adds filter-required root
+            // columns, but nested pruning later is driven by
+            // `projection_input.nested_paths` when we build `ReadColumns`.
+            //
+            // This can under-read nested data if the projection and predicate
+            // reference different subfields under the same root column.
+            //
+            // Example:
+            //   SELECT j.a FROM t WHERE j.b = 1;
+            //
+            // In this case we add root column `j` because the predicate uses it,
+            // but if nested paths only contain `["j", "a"]`, the SST reader may
+            // prune `j` down to `j.a` and then evaluate `j.b = 1` on incomplete
+            // data. We need to either merge predicate-required nested paths into
+            // `ReadColumns`, or disable nested pruning for predicate-referenced
+            // root columns.
+            {
+                self.build_read_column_ids(p, &predicate)?
+            }
             None => self
                 .version
                 .metadata
