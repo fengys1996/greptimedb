@@ -291,11 +291,7 @@ impl FileRange {
                 self.file_handle().file_id().file_id(),
                 self.row_group_idx,
                 cache_strategy,
-                &self
-                    .context
-                    .read_format()
-                    .projection_indices_iter()
-                    .collect::<Vec<_>>(),
+                self.context.read_format().parquet_read_columns(),
                 flat_row_group_reader,
             );
             FlatPruneReader::new_with_last_row_reader(self.context.clone(), reader, skip_fields)
