@@ -55,6 +55,7 @@ use crate::metrics::{
 };
 use crate::read::flat_projection::CompactionProjectionMapper;
 use crate::read::prune::FlatPruneReader;
+use crate::read::read_columns::ReadColumns;
 use crate::read::{Batch, BatchReader};
 use crate::sst::file::FileHandle;
 use crate::sst::index::bloom_filter::applier::{
@@ -380,9 +381,10 @@ impl ParquetReaderBuilder {
                 .map(|col| col.column_id)
                 .collect()
         });
+        let read_cols = ReadColumns::from_column_ids(column_ids);
         let mut read_format = ReadFormat::new(
             region_meta.clone(),
-            Some(&column_ids),
+            Some(read_cols),
             true, // Always reads as flat format.
             Some(parquet_meta.file_metadata().schema_descr().num_columns()),
             &file_path,

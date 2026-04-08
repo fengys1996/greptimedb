@@ -61,7 +61,7 @@ pub struct ReadColumns {
 }
 
 impl ReadColumns {
-    pub fn with_column_ids<I>(column_ids: I) -> Self
+    pub fn from_column_ids<I>(column_ids: I) -> Self
     where
         I: IntoIterator<Item = u32>,
     {

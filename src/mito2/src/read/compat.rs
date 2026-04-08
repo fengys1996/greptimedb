@@ -990,6 +990,7 @@ mod tests {
 
     use super::*;
     use crate::read::flat_projection::FlatProjectionMapper;
+    use crate::read::read_columns::ReadColumns;
     use crate::sst::parquet::flat_format::FlatReadFormat;
     use crate::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
 
@@ -1214,14 +1215,9 @@ mod tests {
         ));
 
         let mapper = FlatProjectionMapper::all(&expected_metadata).unwrap();
-        let read_format = FlatReadFormat::new(
-            actual_metadata.clone(),
-            [0, 1, 2, 3].into_iter(),
-            None,
-            "test",
-            false,
-        )
-        .unwrap();
+        let read_cols = ReadColumns::from_column_ids([0, 1, 2, 3]);
+        let read_format =
+            FlatReadFormat::new(actual_metadata.clone(), read_cols, None, "test", false).unwrap();
         let format_projection = read_format.format_projection();
 
         let compat_batch =
@@ -1309,14 +1305,9 @@ mod tests {
             vec![1, 2, 3],
         )
         .unwrap();
-        let read_format = FlatReadFormat::new(
-            actual_metadata.clone(),
-            [1, 2, 3].into_iter(),
-            None,
-            "test",
-            false,
-        )
-        .unwrap();
+        let read_cols = ReadColumns::from_column_ids([1, 2, 3]);
+        let read_format =
+            FlatReadFormat::new(actual_metadata.clone(), read_cols, None, "test", false).unwrap();
         let format_projection = read_format.format_projection();
 
         let compat_batch =
@@ -1400,14 +1391,9 @@ mod tests {
         let expected_metadata = Arc::new(expected_metadata);
 
         let mapper = FlatProjectionMapper::all(&expected_metadata).unwrap();
-        let read_format = FlatReadFormat::new(
-            actual_metadata.clone(),
-            [0, 1, 2, 3].into_iter(),
-            None,
-            "test",
-            false,
-        )
-        .unwrap();
+        let read_cols = ReadColumns::from_column_ids([0, 1, 2, 3]);
+        let read_format =
+            FlatReadFormat::new(actual_metadata.clone(), read_cols, None, "test", false).unwrap();
         let format_projection = read_format.format_projection();
 
         let compat_batch =
@@ -1494,14 +1480,9 @@ mod tests {
         let expected_metadata = Arc::new(expected_metadata);
 
         let mapper = FlatProjectionMapper::all(&expected_metadata).unwrap();
-        let read_format = FlatReadFormat::new(
-            actual_metadata.clone(),
-            [0, 2, 3].into_iter(),
-            None,
-            "test",
-            true,
-        )
-        .unwrap();
+        let read_cols = ReadColumns::from_column_ids([0, 2, 3]);
+        let read_format =
+            FlatReadFormat::new(actual_metadata.clone(), read_cols, None, "test", true).unwrap();
         let format_projection = read_format.format_projection();
 
         let compat_batch =

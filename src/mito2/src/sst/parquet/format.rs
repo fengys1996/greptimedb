@@ -137,24 +137,21 @@ pub enum ReadFormat {
 
 impl ReadFormat {
     /// Creates a helper to read the primary key format.
-    pub fn new_primary_key(
-        metadata: RegionMetadataRef,
-        column_ids: impl Iterator<Item = ColumnId>,
-    ) -> Self {
-        ReadFormat::PrimaryKey(PrimaryKeyReadFormat::new(metadata, column_ids))
+    pub fn new_primary_key(metadata: RegionMetadataRef, read_cols: ReadColumns) -> Self {
+        ReadFormat::PrimaryKey(PrimaryKeyReadFormat::new(metadata, read_cols))
     }
 
     /// Creates a helper to read the flat format.
     pub fn new_flat(
         metadata: RegionMetadataRef,
-        column_ids: impl Iterator<Item = ColumnId>,
+        read_cols: ReadColumns,
         num_columns: Option<usize>,
         file_path: &str,
         skip_auto_convert: bool,
     ) -> Result<Self> {
         Ok(ReadFormat::Flat(FlatReadFormat::new(
             metadata,
-            column_ids,
+            read_cols,
             num_columns,
             file_path,
             skip_auto_convert,
@@ -164,47 +161,50 @@ impl ReadFormat {
     /// Creates a new read format.
     pub fn new(
         region_metadata: RegionMetadataRef,
-        projection: Option<&[ColumnId]>,
+        projection: Option<ReadColumns>,
         flat_format: bool,
         num_columns: Option<usize>,
         file_path: &str,
         skip_auto_convert: bool,
     ) -> Result<ReadFormat> {
         if flat_format {
-            if let Some(column_ids) = projection {
+            if let Some(read_cols) = projection {
                 ReadFormat::new_flat(
                     region_metadata,
-                    column_ids.iter().copied(),
+                    read_cols,
                     num_columns,
                     file_path,
                     skip_auto_convert,
                 )
             } else {
                 // No projection, lists all column ids to read.
-                ReadFormat::new_flat(
-                    region_metadata.clone(),
+                let read_cols = ReadColumns::from_column_ids(
                     region_metadata
                         .column_metadatas
                         .iter()
                         .map(|col| col.column_id),
+                );
+                ReadFormat::new_flat(
+                    region_metadata.clone(),
+                    read_cols,
                     num_columns,
                     file_path,
                     skip_auto_convert,
                 )
             }
-        } else if let Some(column_ids) = projection {
-            Ok(ReadFormat::new_primary_key(
-                region_metadata,
-                column_ids.iter().copied(),
-            ))
+        } else if let Some(read_cols) = projection {
+            Ok(ReadFormat::new_primary_key(region_metadata, read_cols))
         } else {
             // No projection, lists all column ids to read.
-            Ok(ReadFormat::new_primary_key(
-                region_metadata.clone(),
+            let read_cols = ReadColumns::from_column_ids(
                 region_metadata
                     .column_metadatas
                     .iter()
                     .map(|col| col.column_id),
+            );
+            Ok(ReadFormat::new_primary_key(
+                region_metadata.clone(),
+                read_cols,
             ))
         }
     }
@@ -244,15 +244,18 @@ impl ReadFormat {
 
     /// Gets sorted projection indices to read.
     pub(crate) fn projection_indices(&self) -> &[usize] {
-        match self {
-            ReadFormat::PrimaryKey(format) => format.projection_indices(),
-            ReadFormat::Flat(format) => format.projection_indices(),
-        }
+        // match self {
+        //     ReadFormat::PrimaryKey(format) => format.projection_indices(),
+        //     ReadFormat::Flat(format) => format.projection_indices(),
+        // }
+        todo!()
     }
 
     pub(crate) fn parquet_read_columns(&self) -> ParquetReadColumns {
-        // TODO(fys): implement it.
-        todo!()
+        match self {
+            ReadFormat::PrimaryKey(format) => format.parquet_read_columns().clone(),
+            ReadFormat::Flat(format) => format.parquet_read_columns(),
+        }
     }
 
     /// Returns min values of specific column in row groups.
@@ -405,7 +408,7 @@ pub struct PrimaryKeyReadFormat {
     /// In SST schema, fields are stored in the front of the schema.
     field_id_to_index: HashMap<ColumnId, usize>,
     /// Indices of columns to read from the SST. It contains all internal columns.
-    projection_indices: Vec<usize>,
+    parquet_read_cols: ParquetReadColumns,
     /// Field column id to their index in the projected schema (
     /// the schema of [Batch]).
     field_id_to_projected_index: HashMap<ColumnId, usize>,
@@ -417,10 +420,7 @@ pub struct PrimaryKeyReadFormat {
 
 impl PrimaryKeyReadFormat {
     /// Creates a helper with existing `metadata` and `column_ids` to read.
-    pub fn new(
-        metadata: RegionMetadataRef,
-        column_ids: impl Iterator<Item = ColumnId>,
-    ) -> PrimaryKeyReadFormat {
+    pub fn new(metadata: RegionMetadataRef, read_cols: ReadColumns) -> PrimaryKeyReadFormat {
         let field_id_to_index: HashMap<_, _> = metadata
             .field_columns()
             .enumerate()
@@ -431,14 +431,14 @@ impl PrimaryKeyReadFormat {
         let format_projection = FormatProjection::compute_format_projection(
             &field_id_to_index,
             arrow_schema.fields.len(),
-            column_ids,
+            read_cols,
         );
 
         PrimaryKeyReadFormat {
             metadata,
             arrow_schema,
             field_id_to_index,
-            projection_indices: format_projection.projection_indices,
+            parquet_read_cols: format_projection.parquet_read_cols,
             field_id_to_projected_index: format_projection.column_id_to_projected_index,
             override_sequence: None,
             primary_key_codec: None,
@@ -472,14 +472,8 @@ impl PrimaryKeyReadFormat {
         &self.metadata
     }
 
-    /// Gets sorted projection indices to read.
-    pub(crate) fn projection_indices(&self) -> &[usize] {
-        &self.projection_indices
-    }
-
-    pub(crate) fn parquet_read_columns(&self) -> ParquetReadColumns {
-        // TODO(fys): implement it.
-        todo!()
+    pub(crate) fn parquet_read_columns(&self) -> &ParquetReadColumns {
+        &self.parquet_read_cols
     }
 
     /// Gets the field id to projected index.
@@ -800,7 +794,7 @@ impl PrimaryKeyReadFormat {
 }
 
 /// Helper to compute the projection for the SST.
-pub(crate) struct FormatProjection1 {
+pub(crate) struct FormatProjection {
     /// The columns to read from the SST. It contains all internal columns.
     pub(crate) parquet_read_cols: ParquetReadColumns,
     /// Column id to their index in the projected schema (
@@ -810,7 +804,7 @@ pub(crate) struct FormatProjection1 {
     pub(crate) column_id_to_projected_index: HashMap<ColumnId, usize>,
 }
 
-impl FormatProjection1 {
+impl FormatProjection {
     /// Computes the projection.
     ///
     /// `id_to_index` is a mapping from column id to the index of the column in the SST.
@@ -911,70 +905,6 @@ impl FormatProjection1 {
     }
 }
 
-/// Helper to compute the projection for the SST.
-pub(crate) struct FormatProjection {
-    /// Indices of columns to read from the SST. It contains all internal columns.
-    pub(crate) projection_indices: Vec<usize>,
-    /// Column id to their index in the projected schema (
-    /// the schema after projection).
-    ///
-    /// It doesn't contain time index column if it is not present in the projection.
-    pub(crate) column_id_to_projected_index: HashMap<ColumnId, usize>,
-}
-
-impl FormatProjection {
-    /// Computes the projection.
-    ///
-    /// `id_to_index` is a mapping from column id to the index of the column in the SST.
-    pub(crate) fn compute_format_projection(
-        id_to_index: &HashMap<ColumnId, usize>,
-        sst_column_num: usize,
-        column_ids: impl Iterator<Item = ColumnId>,
-    ) -> Self {
-        // Maps column id of a projected column to its index in SST.
-        // It also ignores columns not in the SST.
-        // [(column id, index in SST)]
-        let mut projected_schema: Vec<_> = column_ids
-            .filter_map(|column_id| {
-                id_to_index
-                    .get(&column_id)
-                    .copied()
-                    .map(|index| (column_id, index))
-            })
-            .collect();
-        // Sorts columns by their indices in the SST. SST uses a bitmap for projection.
-        // This ensures the schema of `projected_schema` is the same as the batch returned from the SST.
-        projected_schema.sort_unstable_by_key(|x| x.1);
-        // Dedups the entries to avoid the case that `column_ids` has duplicated columns.
-        projected_schema.dedup_by_key(|x| x.1);
-
-        // Collects all projected indices.
-        // It contains the positions of all columns we need to read.
-        let mut projection_indices: Vec<_> = projected_schema
-            .iter()
-            .map(|(_column_id, index)| *index)
-            // We need to add all fixed position columns.
-            .chain(sst_column_num - FIXED_POS_COLUMN_NUM..sst_column_num)
-            .collect();
-        projection_indices.sort_unstable();
-        // Removes duplications.
-        projection_indices.dedup();
-
-        // Creates a map from column id to the index of that column in the projected record batch.
-        let column_id_to_projected_index = projected_schema
-            .into_iter()
-            .map(|(column_id, _)| column_id)
-            .enumerate()
-            .map(|(index, column_id)| (column_id, index))
-            .collect();
-
-        Self {
-            projection_indices,
-            column_id_to_projected_index,
-        }
-    }
-}
-
 /// Values of column statistics of the SST.
 ///
 /// It also distinguishes the case that a column is not found and
@@ -1002,10 +932,9 @@ impl StatValues {
 impl PrimaryKeyReadFormat {
     /// Creates a helper with existing `metadata` and all columns.
     pub fn new_with_all_columns(metadata: RegionMetadataRef) -> PrimaryKeyReadFormat {
-        Self::new(
-            Arc::clone(&metadata),
-            metadata.column_metadatas.iter().map(|c| c.column_id),
-        )
+        let read_cols =
+            ReadColumns::from_column_ids(metadata.column_metadatas.iter().map(|c| c.column_id));
+        Self::new(Arc::clone(&metadata), read_cols)
     }
 }
 
@@ -1258,16 +1187,20 @@ mod tests {
     fn test_projection_indices() {
         let metadata = build_test_region_metadata();
         // Only read tag1
-        let read_format = ReadFormat::new_primary_key(metadata.clone(), [3].iter().copied());
+        let read_cols = ReadColumns::from_column_ids([3]);
+        let read_format = ReadFormat::new_primary_key(metadata.clone(), read_cols);
         assert_eq!(&[2, 3, 4, 5], read_format.projection_indices());
         // Only read field1
-        let read_format = ReadFormat::new_primary_key(metadata.clone(), [4].iter().copied());
+        let read_cols = ReadColumns::from_column_ids([4]);
+        let read_format = ReadFormat::new_primary_key(metadata.clone(), read_cols);
         assert_eq!(&[0, 2, 3, 4, 5], read_format.projection_indices());
         // Only read ts
-        let read_format = ReadFormat::new_primary_key(metadata.clone(), [5].iter().copied());
+        let read_cols = ReadColumns::from_column_ids([5]);
+        let read_format = ReadFormat::new_primary_key(metadata.clone(), read_cols);
         assert_eq!(&[2, 3, 4, 5], read_format.projection_indices());
         // Read field0, tag0, ts
-        let read_format = ReadFormat::new_primary_key(metadata, [2, 1, 5].iter().copied());
+        let read_cols = ReadColumns::from_column_ids([2, 1, 5]);
+        let read_format = ReadFormat::new_primary_key(metadata, read_cols);
         assert_eq!(&[1, 2, 3, 4, 5], read_format.projection_indices());
     }
 
@@ -1314,7 +1247,8 @@ mod tests {
             .iter()
             .map(|col| col.column_id)
             .collect();
-        let read_format = PrimaryKeyReadFormat::new(metadata, column_ids.iter().copied());
+        let read_cols = ReadColumns::from_column_ids(column_ids.iter().copied());
+        let read_format = PrimaryKeyReadFormat::new(metadata, read_cols);
         assert_eq!(arrow_schema, *read_format.arrow_schema());
 
         let record_batch = RecordBatch::new_empty(arrow_schema);
@@ -1333,7 +1267,8 @@ mod tests {
             .iter()
             .map(|col| col.column_id)
             .collect();
-        let read_format = PrimaryKeyReadFormat::new(metadata, column_ids.iter().copied());
+        let read_cols = ReadColumns::from_column_ids(column_ids.iter().copied());
+        let read_format = PrimaryKeyReadFormat::new(metadata, read_cols);
 
         let columns: Vec<ArrayRef> = vec![
             Arc::new(Int64Array::from(vec![1, 1, 10, 10])), // field1
@@ -1359,13 +1294,10 @@ mod tests {
     #[test]
     fn test_convert_record_batch_with_override_sequence() {
         let metadata = build_test_region_metadata();
-        let column_ids: Vec<_> = metadata
-            .column_metadatas
-            .iter()
-            .map(|col| col.column_id)
-            .collect();
+        let read_cols =
+            ReadColumns::from_column_ids(metadata.column_metadatas.iter().map(|c| c.column_id));
         let read_format =
-            ReadFormat::new(metadata, Some(&column_ids), false, None, "test", false).unwrap();
+            ReadFormat::new(metadata, Some(read_cols), false, None, "test", false).unwrap();
 
         let columns: Vec<ArrayRef> = vec![
             Arc::new(Int64Array::from(vec![1, 1, 10, 10])), // field1
@@ -1493,35 +1425,36 @@ mod tests {
         // The projection includes all "fixed position" columns: ts(4), __primary_key(5), __sequence(6), __op_type(7)
 
         // Only read tag1 (column_id=3, index=1) + fixed columns
+        let read_cols = ReadColumns::from_column_ids([3]);
         let read_format =
-            ReadFormat::new_flat(metadata.clone(), [3].iter().copied(), None, "test", false)
-                .unwrap();
+            ReadFormat::new_flat(metadata.clone(), read_cols, None, "test", false).unwrap();
         assert_eq!(&[1, 4, 5, 6, 7], read_format.projection_indices());
 
         // Only read field1 (column_id=4, index=2) + fixed columns
+        let read_cols = ReadColumns::from_column_ids([4]);
         let read_format =
-            ReadFormat::new_flat(metadata.clone(), [4].iter().copied(), None, "test", false)
-                .unwrap();
+            ReadFormat::new_flat(metadata.clone(), read_cols, None, "test", false).unwrap();
         assert_eq!(&[2, 4, 5, 6, 7], read_format.projection_indices());
 
         // Only read ts (column_id=5, index=4) + fixed columns (ts is already included in fixed)
+        let read_cols = ReadColumns::from_column_ids([5]);
         let read_format =
-            ReadFormat::new_flat(metadata.clone(), [5].iter().copied(), None, "test", false)
-                .unwrap();
+            ReadFormat::new_flat(metadata.clone(), read_cols, None, "test", false).unwrap();
         assert_eq!(&[4, 5, 6, 7], read_format.projection_indices());
 
         // Read field0(column_id=2, index=3), tag0(column_id=1, index=0), ts(column_id=5, index=4) + fixed columns
-        let read_format =
-            ReadFormat::new_flat(metadata, [2, 1, 5].iter().copied(), None, "test", false).unwrap();
+        let read_cols = ReadColumns::from_column_ids([2, 1, 5]);
+        let read_format = ReadFormat::new_flat(metadata, read_cols, None, "test", false).unwrap();
         assert_eq!(&[0, 3, 4, 5, 6, 7], read_format.projection_indices());
     }
 
     #[test]
     fn test_flat_read_format_convert_batch() {
         let metadata = build_test_region_metadata();
+        let read_cols = ReadColumns::from_column_ids(std::iter::once(1));
         let mut format = FlatReadFormat::new(
             metadata,
-            std::iter::once(1), // Just read tag0
+            read_cols, // Just read tag0
             Some(8),
             "test",
             false,
@@ -1736,14 +1669,9 @@ mod tests {
             .iter()
             .map(|c| c.column_id)
             .collect();
-        let format = FlatReadFormat::new(
-            metadata.clone(),
-            column_ids.into_iter(),
-            Some(6),
-            "test",
-            false,
-        )
-        .unwrap();
+        let read_cols = ReadColumns::from_column_ids(column_ids);
+        let format =
+            FlatReadFormat::new(metadata.clone(), read_cols, Some(6), "test", false).unwrap();
 
         let num_rows = 4;
         let original_sequence = 100u64;
@@ -1818,14 +1746,8 @@ mod tests {
             .iter()
             .map(|c| c.column_id)
             .collect();
-        let format = FlatReadFormat::new(
-            metadata.clone(),
-            column_ids.clone().into_iter(),
-            None,
-            "test",
-            false,
-        )
-        .unwrap();
+        let read_cols = ReadColumns::from_column_ids(column_ids.clone());
+        let format = FlatReadFormat::new(metadata.clone(), read_cols, None, "test", false).unwrap();
 
         let num_rows = 4;
         let original_sequence = 100u64;
@@ -1907,9 +1829,8 @@ mod tests {
         // Compare the actual result with the expected record batch
         assert_eq!(expected_record_batch, result);
 
-        let format =
-            FlatReadFormat::new(metadata.clone(), column_ids.into_iter(), None, "test", true)
-                .unwrap();
+        let read_cols = ReadColumns::from_column_ids(column_ids);
+        let format = FlatReadFormat::new(metadata.clone(), read_cols, None, "test", true).unwrap();
         // Test conversion with sparse encoding and skip convert.
         let result = format.convert_batch(record_batch.clone(), None).unwrap();
         assert_eq!(record_batch, result);

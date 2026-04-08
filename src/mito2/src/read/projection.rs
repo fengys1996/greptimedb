@@ -29,7 +29,7 @@ use datatypes::vectors::VectorRef;
 use mito_codec::row_converter::{CompositeValues, PrimaryKeyCodec, build_primary_key_codec};
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::ColumnId;
+use store_api::storage::{ColumnId, ProjectionInput};
 
 use crate::cache::CacheStrategy;
 use crate::error::{InvalidRequestSnafu, Result};
@@ -65,8 +65,13 @@ impl ProjectionMapper {
         read_column_ids: Vec<ColumnId>,
     ) -> Result<Self> {
         let projection: Vec<_> = projection.collect();
+        let projection_input = ProjectionInput::new().with_projection(projection);
         Ok(ProjectionMapper::Flat(
-            FlatProjectionMapper::new_with_read_columns(metadata, projection, read_column_ids)?,
+            FlatProjectionMapper::new_with_read_columns(
+                metadata,
+                projection_input,
+                read_column_ids,
+            )?,
         ))
     }
 
