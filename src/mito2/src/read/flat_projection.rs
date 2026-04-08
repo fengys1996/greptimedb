@@ -20,8 +20,10 @@ use api::v1::SemanticType;
 use common_error::ext::BoxedError;
 use common_recordbatch::error::{ArrowComputeSnafu, ExternalSnafu, NewDfRecordBatchSnafu};
 use common_recordbatch::{DfRecordBatch, RecordBatch};
+use datafusion_common::cast_column;
 use datatypes::arrow::array::Array;
 use datatypes::arrow::datatypes::{DataType as ArrowDataType, Field};
+use datatypes::compute::CastOptions;
 use datatypes::prelude::{ConcreteDataType, DataType};
 use datatypes::schema::{Schema, SchemaRef};
 use datatypes::value::Value;
@@ -291,6 +293,27 @@ impl FlatProjectionMapper {
                     let casted = datatypes::arrow::compute::cast(&array, value_type)
                         .context(ArrowComputeSnafu)?;
                     array = casted;
+                }
+            }
+            // TODO(fys): remove this after we fix the schema mismatch issue.
+            else {
+                let target_schema = self.output_schema.arrow_schema();
+                if *target_schema != batch.schema() {
+                    common_telemetry::info!(
+                        "Casting column {} from type {} to {} since the batch schema doesn't match the output schema",
+                        self.output_schema.column_schemas()[output_idx].name,
+                        batch.schema().field(*index).data_type(),
+                        target_schema.field(output_idx).data_type()
+                    );
+                    let source_col = batch.column(*index).clone();
+                    let target_field = self.output_schema.arrow_schema().field(output_idx);
+                    array =
+                        cast_column(&source_col, target_field, &CastOptions::default()).unwrap();
+                } else {
+                    common_telemetry::info!(
+                        "Skip casting column {} since the batch schema matches the output schema",
+                        self.output_schema.column_schemas()[output_idx].name
+                    );
                 }
             }
             arrays.push(array);
