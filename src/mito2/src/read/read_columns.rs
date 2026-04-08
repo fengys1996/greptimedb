@@ -80,6 +80,10 @@ impl ReadColumns {
         self.cols.iter().map(|column| column.column_id())
     }
 
+    pub fn column_ids(&self) -> Vec<ColumnId> {
+        self.column_ids_iter().collect()
+    }
+
     pub fn columns(&self) -> &[ReadColumn] {
         &self.cols
     }

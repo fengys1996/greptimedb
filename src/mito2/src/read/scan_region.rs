@@ -783,7 +783,7 @@ pub struct ScanInput {
     access_layer: AccessLayerRef,
     /// Maps projected Batches to RecordBatches.
     pub(crate) mapper: Arc<ProjectionMapper>,
-    /// Column ids to read from memtables and SSTs.
+    /// The columns to read from memtables and SSTs.
     /// Notice this is different from the columns in `mapper` which are projected columns.
     /// But this read columns might also include non-projected columns needed for filtering.
     pub(crate) read_cols: ReadColumns,
@@ -1451,11 +1451,10 @@ pub(crate) fn build_scan_fingerprint(input: &ScanInput) -> Option<ScanRequestFin
     // Ensure the filters are sorted for consistent fingerprinting.
     filters.sort_unstable();
     time_filters.sort_unstable();
-    let col_ids = input.read_cols.column_ids_iter().collect::<Vec<_>>();
+    let read_column_ids = input.read_cols.column_ids();
     Some(
         crate::read::range_cache::ScanRequestFingerprintBuilder {
-            read_column_ids: col_ids.clone(),
-            read_column_types: col_ids
+            read_column_types: read_column_ids
                 .iter()
                 .map(|id| {
                     metadata
@@ -1463,6 +1462,7 @@ pub(crate) fn build_scan_fingerprint(input: &ScanInput) -> Option<ScanRequestFin
                         .map(|col| col.column_schema.data_type.clone())
                 })
                 .collect(),
+            read_column_ids,
             filters,
             time_filters,
             series_row_selector: input.series_row_selector,
@@ -1977,9 +1977,8 @@ mod tests {
 
         let fingerprint = build_scan_fingerprint(&input).unwrap();
 
-        let read_column_ids = input.read_cols.column_ids_iter().collect::<Vec<_>>();
         let expected = ScanRequestFingerprintBuilder {
-            read_column_ids,
+            read_column_ids: input.read_cols.column_ids(),
             read_column_types: vec![
                 metadata
                     .column_by_id(0)
@@ -2054,9 +2053,8 @@ mod tests {
         let input = new_scan_input(metadata.clone(), vec![col("k0").eq(lit("foo"))]).await;
         let fingerprint = build_scan_fingerprint(&input).unwrap();
 
-        let read_column_ids = input.read_cols.column_ids_iter().collect::<Vec<_>>();
         let expected = ScanRequestFingerprintBuilder {
-            read_column_ids,
+            read_column_ids: input.read_cols.column_ids(),
             read_column_types: vec![
                 metadata
                     .column_by_id(0)
