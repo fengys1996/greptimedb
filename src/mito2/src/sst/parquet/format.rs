@@ -243,12 +243,11 @@ impl ReadFormat {
     }
 
     /// Gets sorted projection indices to read.
-    pub(crate) fn projection_indices(&self) -> &[usize] {
-        // match self {
-        //     ReadFormat::PrimaryKey(format) => format.projection_indices(),
-        //     ReadFormat::Flat(format) => format.projection_indices(),
-        // }
-        todo!()
+    pub(crate) fn projection_indices_iter(&self) -> impl Iterator<Item = usize> + '_ {
+        self.parquet_read_columns()
+            .columns()
+            .iter()
+            .map(|col| col.root_index())
     }
 
     pub(crate) fn parquet_read_columns(&self) -> &ParquetReadColumns {
@@ -1189,19 +1188,43 @@ mod tests {
         // Only read tag1
         let read_cols = ReadColumns::from_column_ids([3]);
         let read_format = ReadFormat::new_primary_key(metadata.clone(), read_cols);
-        assert_eq!(&[2, 3, 4, 5], read_format.projection_indices());
+        assert_eq!(
+            &[2, 3, 4, 5],
+            read_format
+                .projection_indices_iter()
+                .collect::<Vec<_>>()
+                .as_slice()
+        );
         // Only read field1
         let read_cols = ReadColumns::from_column_ids([4]);
         let read_format = ReadFormat::new_primary_key(metadata.clone(), read_cols);
-        assert_eq!(&[0, 2, 3, 4, 5], read_format.projection_indices());
+        assert_eq!(
+            &[0, 2, 3, 4, 5],
+            read_format
+                .projection_indices_iter()
+                .collect::<Vec<_>>()
+                .as_slice()
+        );
         // Only read ts
         let read_cols = ReadColumns::from_column_ids([5]);
         let read_format = ReadFormat::new_primary_key(metadata.clone(), read_cols);
-        assert_eq!(&[2, 3, 4, 5], read_format.projection_indices());
+        assert_eq!(
+            &[2, 3, 4, 5],
+            read_format
+                .projection_indices_iter()
+                .collect::<Vec<_>>()
+                .as_slice()
+        );
         // Read field0, tag0, ts
         let read_cols = ReadColumns::from_column_ids([2, 1, 5]);
         let read_format = ReadFormat::new_primary_key(metadata, read_cols);
-        assert_eq!(&[1, 2, 3, 4, 5], read_format.projection_indices());
+        assert_eq!(
+            &[1, 2, 3, 4, 5],
+            read_format
+                .projection_indices_iter()
+                .collect::<Vec<_>>()
+                .as_slice()
+        );
     }
 
     #[test]
@@ -1428,24 +1451,48 @@ mod tests {
         let read_cols = ReadColumns::from_column_ids([3]);
         let read_format =
             ReadFormat::new_flat(metadata.clone(), read_cols, None, "test", false).unwrap();
-        assert_eq!(&[1, 4, 5, 6, 7], read_format.projection_indices());
+        assert_eq!(
+            &[1, 4, 5, 6, 7],
+            read_format
+                .projection_indices_iter()
+                .collect::<Vec<_>>()
+                .as_slice()
+        );
 
         // Only read field1 (column_id=4, index=2) + fixed columns
         let read_cols = ReadColumns::from_column_ids([4]);
         let read_format =
             ReadFormat::new_flat(metadata.clone(), read_cols, None, "test", false).unwrap();
-        assert_eq!(&[2, 4, 5, 6, 7], read_format.projection_indices());
+        assert_eq!(
+            &[2, 4, 5, 6, 7],
+            read_format
+                .projection_indices_iter()
+                .collect::<Vec<_>>()
+                .as_slice()
+        );
 
         // Only read ts (column_id=5, index=4) + fixed columns (ts is already included in fixed)
         let read_cols = ReadColumns::from_column_ids([5]);
         let read_format =
             ReadFormat::new_flat(metadata.clone(), read_cols, None, "test", false).unwrap();
-        assert_eq!(&[4, 5, 6, 7], read_format.projection_indices());
+        assert_eq!(
+            &[4, 5, 6, 7],
+            read_format
+                .projection_indices_iter()
+                .collect::<Vec<_>>()
+                .as_slice()
+        );
 
         // Read field0(column_id=2, index=3), tag0(column_id=1, index=0), ts(column_id=5, index=4) + fixed columns
         let read_cols = ReadColumns::from_column_ids([2, 1, 5]);
         let read_format = ReadFormat::new_flat(metadata, read_cols, None, "test", false).unwrap();
-        assert_eq!(&[0, 3, 4, 5, 6, 7], read_format.projection_indices());
+        assert_eq!(
+            &[0, 3, 4, 5, 6, 7],
+            read_format
+                .projection_indices_iter()
+                .collect::<Vec<_>>()
+                .as_slice()
+        );
     }
 
     #[test]

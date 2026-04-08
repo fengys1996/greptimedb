@@ -61,11 +61,9 @@ impl ProjectionMapper {
     /// Returns a new mapper with output projection and explicit read columns.
     pub fn new_with_read_columns(
         metadata: &RegionMetadataRef,
-        projection: impl Iterator<Item = usize>,
+        projection_input: ProjectionInput,
         read_column_ids: Vec<ColumnId>,
     ) -> Result<Self> {
-        let projection: Vec<_> = projection.collect();
-        let projection_input = ProjectionInput::new().with_projection(projection);
         Ok(ProjectionMapper::Flat(
             FlatProjectionMapper::new_with_read_columns(
                 metadata,
@@ -656,8 +654,9 @@ mod tests {
         );
         let cache = CacheStrategy::Disabled;
         // Output columns v1, k0. Read also includes v0.
+        let projection_input = ProjectionInput::new().with_projection(vec![4, 1]);
         let mapper =
-            ProjectionMapper::new_with_read_columns(&metadata, [4, 1].into_iter(), vec![4, 1, 3])
+            ProjectionMapper::new_with_read_columns(&metadata, projection_input, vec![4, 1, 3])
                 .unwrap();
         assert_eq!([4, 1, 3], mapper.column_ids());
 
