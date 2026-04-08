@@ -28,11 +28,12 @@ use datatypes::value::Value;
 use datatypes::vectors::Helper;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
-use store_api::storage::ColumnId;
+use store_api::storage::{ColumnId, ProjectionInput};
 
 use crate::cache::CacheStrategy;
 use crate::error::{InvalidRequestSnafu, RecordBatchSnafu, Result};
 use crate::read::projection::{read_column_ids_from_projection, repeated_vector_with_cache};
+use crate::read::read_columns::build_read_columns;
 use crate::sst::parquet::flat_format::sst_column_id_indices;
 use crate::sst::parquet::format::FormatProjection;
 use crate::sst::{
@@ -77,15 +78,17 @@ impl FlatProjectionMapper {
     ) -> Result<Self> {
         let projection: Vec<_> = projection.collect();
         let read_column_ids = read_column_ids_from_projection(metadata, &projection)?;
-        Self::new_with_read_columns(metadata, projection, read_column_ids)
+        let projection_input = ProjectionInput::new().with_projection(projection);
+        Self::new_with_read_columns(metadata, projection_input, read_column_ids)
     }
 
     /// Returns a new mapper with output projection and explicit read columns.
     pub fn new_with_read_columns(
         metadata: &RegionMetadataRef,
-        projection: Vec<usize>,
+        projection_input: ProjectionInput,
         read_column_ids: Vec<ColumnId>,
     ) -> Result<Self> {
+        let projection = projection_input.projection;
         // If the original projection is empty.
         let is_empty_projection = projection.is_empty();
 
@@ -111,12 +114,14 @@ impl FlatProjectionMapper {
 
         // Creates a map to lookup index.
         let id_to_index = sst_column_id_indices(metadata);
+        let read_cols =
+            build_read_columns(metadata, &projection_input.nested_paths, &read_column_ids)?;
         // TODO(yingwen): Support different flat schema options.
         let format_projection = FormatProjection::compute_format_projection(
             &id_to_index,
             // All columns with internal columns.
             metadata.column_metadatas.len() + 3,
-            read_column_ids.iter().copied(),
+            read_cols,
         );
 
         let batch_schema = flat_projected_columns(metadata, &format_projection);
@@ -440,9 +445,10 @@ impl CompactionProjectionMapper {
             .chain([metadata.time_index_column_pos()])
             .collect::<Vec<_>>();
 
+        let projection_input = ProjectionInput::new().with_projection(projection);
         let mapper = FlatProjectionMapper::new_with_read_columns(
             metadata,
-            projection,
+            projection_input,
             metadata
                 .column_metadatas
                 .iter()

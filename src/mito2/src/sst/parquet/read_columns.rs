@@ -24,6 +24,10 @@ pub struct ParquetReadColumns {
 }
 
 impl ParquetReadColumns {
+    pub fn new(cols: Vec<ParquetReadColumn>) -> Self {
+        Self { cols }
+    }
+
     /// Builds root-column projections from root indices that are already
     /// deduplicated.
     ///
