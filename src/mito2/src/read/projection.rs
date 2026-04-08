@@ -592,10 +592,7 @@ mod tests {
         );
         let cache = CacheStrategy::Disabled;
         let mapper = ProjectionMapper::all(&metadata).unwrap();
-        assert_eq!(
-            vec![0, 1, 2, 3, 4],
-            mapper.read_columns().column_ids_iter().collect::<Vec<_>>()
-        );
+        assert_eq!(vec![0, 1, 2, 3, 4], mapper.read_columns().column_ids());
         assert_eq!(
             [
                 (1, ConcreteDataType::int64_datatype()),
@@ -631,10 +628,7 @@ mod tests {
         let cache = CacheStrategy::Disabled;
         // Columns v1, k0
         let mapper = ProjectionMapper::new(&metadata, [4, 1].into_iter()).unwrap();
-        assert_eq!(
-            vec![4, 1],
-            mapper.read_columns().column_ids_iter().collect::<Vec<_>>()
-        );
+        assert_eq!(vec![4, 1], mapper.read_columns().column_ids());
         assert_eq!(
             [
                 (1, ConcreteDataType::int64_datatype()),
@@ -671,10 +665,7 @@ mod tests {
         let mapper =
             ProjectionMapper::new_with_read_columns(&metadata, projection_input, vec![4, 1, 3])
                 .unwrap();
-        assert_eq!(
-            vec![4, 1, 3],
-            mapper.read_columns().column_ids_iter().collect::<Vec<_>>()
-        );
+        assert_eq!(vec![4, 1, 3], mapper.read_columns().column_ids());
 
         let batch = new_flat_batch(None, &[(1, 1)], &[(3, 3), (4, 4)], 3);
         let record_batch = mapper.as_flat().unwrap().convert(&batch, &cache).unwrap();
@@ -700,10 +691,7 @@ mod tests {
         let cache = CacheStrategy::Disabled;
         // Empty projection
         let mapper = ProjectionMapper::new(&metadata, [].into_iter()).unwrap();
-        assert_eq!(
-            vec![0],
-            mapper.read_columns().column_ids_iter().collect::<Vec<_>>()
-        ); // Should still read the time index column
+        assert_eq!(vec![0], mapper.read_columns().column_ids()); // Should still read the time index column
         assert!(mapper.output_schema().is_empty());
         let flat_mapper = mapper.as_flat().unwrap();
         assert_eq!(

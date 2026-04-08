@@ -122,7 +122,7 @@ pub struct ParquetReaderBuilder {
     object_store: ObjectStore,
     /// Predicate to push down.
     predicate: Option<Predicate>,
-    /// Metadata of columns to read.
+    /// The columns to read.
     ///
     /// `None` reads all columns. Due to schema change, the projection
     /// can contain columns not in the parquet file.
