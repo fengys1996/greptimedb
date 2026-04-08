@@ -986,7 +986,7 @@ mod tests {
     };
     use store_api::codec::PrimaryKeyEncoding;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
-    use store_api::storage::RegionId;
+    use store_api::storage::{ProjectionInput, RegionId};
 
     use super::*;
     use crate::read::flat_projection::FlatProjectionMapper;
@@ -1299,9 +1299,10 @@ mod tests {
         ));
 
         // Output projection: tag_1, field_2. Read also includes field_3.
+        let projection_input = ProjectionInput::new().with_projection(vec![1, 2]);
         let mapper = FlatProjectionMapper::new_with_read_columns(
             &expected_metadata,
-            vec![1, 2],
+            projection_input,
             vec![1, 2, 3],
         )
         .unwrap();

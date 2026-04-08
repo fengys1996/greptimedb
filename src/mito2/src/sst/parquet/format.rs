@@ -251,9 +251,9 @@ impl ReadFormat {
         todo!()
     }
 
-    pub(crate) fn parquet_read_columns(&self) -> ParquetReadColumns {
+    pub(crate) fn parquet_read_columns(&self) -> &ParquetReadColumns {
         match self {
-            ReadFormat::PrimaryKey(format) => format.parquet_read_columns().clone(),
+            ReadFormat::PrimaryKey(format) => format.parquet_read_columns(),
             ReadFormat::Flat(format) => format.parquet_read_columns(),
         }
     }

@@ -265,10 +265,10 @@ impl FlatReadFormat {
         }
     }
 
-    pub(crate) fn parquet_read_columns(&self) -> ParquetReadColumns {
+    pub(crate) fn parquet_read_columns(&self) -> &ParquetReadColumns {
         match &self.parquet_adapter {
-            ParquetAdapter::Flat(_p) => todo!(),
-            ParquetAdapter::PrimaryKeyToFlat(p) => p.format.parquet_read_columns().clone(),
+            ParquetAdapter::Flat(p) => &p.format_projection.parquet_read_cols,
+            ParquetAdapter::PrimaryKeyToFlat(p) => p.format.parquet_read_columns(),
         }
     }
 
