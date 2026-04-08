@@ -402,10 +402,10 @@ impl ScanRegion {
         };
 
         // The mapper always computes projected column ids as the schema of SSTs may change.
-        let mapper = match self.request.projection_indices() {
-            Some(_) => ProjectionMapper::new_with_read_columns(
+        let mapper = match self.request.projection_input.as_ref() {
+            Some(projection_input) => ProjectionMapper::new_with_read_columns(
                 &self.version.metadata,
-                self.request.projection_input.clone().unwrap(),
+                projection_input.clone(),
                 read_column_ids.clone(),
             )?,
             None => ProjectionMapper::all(&self.version.metadata)?,
