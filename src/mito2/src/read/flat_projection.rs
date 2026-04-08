@@ -121,8 +121,7 @@ impl FlatProjectionMapper {
             &id_to_index,
             // All columns with internal columns.
             metadata.column_metadatas.len() + 3,
-            // TODO(fys): avoid cloning read column ids.
-            read_cols.clone(),
+            &read_cols,
         );
 
         let batch_schema = flat_projected_columns(metadata, &format_projection);

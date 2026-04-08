@@ -430,7 +430,7 @@ impl PrimaryKeyReadFormat {
         let format_projection = FormatProjection::compute_format_projection(
             &field_id_to_index,
             arrow_schema.fields.len(),
-            read_cols,
+            &read_cols,
         );
 
         PrimaryKeyReadFormat {
@@ -810,7 +810,7 @@ impl FormatProjection {
     pub(crate) fn compute_format_projection(
         id_to_index: &HashMap<ColumnId, usize>,
         sst_column_num: usize,
-        column_ids: ReadColumns,
+        column_ids: &ReadColumns,
     ) -> Self {
         let projected_columns = Self::collect_projected_columns(id_to_index, column_ids);
 
@@ -833,7 +833,7 @@ impl FormatProjection {
 
     fn collect_projected_columns(
         id_to_index: &HashMap<ColumnId, usize>,
-        column_ids: ReadColumns,
+        column_ids: &ReadColumns,
     ) -> Vec<(ColumnId, usize, Vec<Vec<String>>)> {
         let mut projected_columns: Vec<_> = column_ids
             .columns()
