@@ -402,6 +402,8 @@ impl ParquetReaderBuilder {
         let parquet_schema_desc = parquet_meta.file_metadata().schema_descr();
         let parquet_read_cols = read_format.parquet_read_columns();
         let leaf_indices = build_parquet_leaves_indices(parquet_schema_desc, &parquet_read_cols);
+        // TODO(fys): remove it later.
+        common_telemetry::info!("leaf_indices: {:?}", leaf_indices);
         let projection_mask =
             ProjectionMask::leaves(parquet_schema_desc, leaf_indices.iter().copied());
         let selection = self

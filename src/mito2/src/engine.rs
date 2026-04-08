@@ -121,7 +121,9 @@ use store_api::region_request::{
     AffectedRows, RegionCatchupRequest, RegionOpenRequest, RegionRequest,
 };
 use store_api::sst_entry::{ManifestSstEntry, PuffinIndexMetaEntry, StorageSstEntry};
-use store_api::storage::{FileId, FileRefsManifest, RegionId, ScanRequest, SequenceNumber};
+use store_api::storage::{
+    FileId, FileRefsManifest, ProjectionInput, RegionId, ScanRequest, SequenceNumber,
+};
 use tokio::sync::{Semaphore, oneshot};
 
 use crate::access_layer::RegionFilePathFactory;
@@ -1011,10 +1013,75 @@ impl EngineInner {
             .map(|r| r.find_committed_sequence())
     }
 
+    // TODO(fys): remove it later.
+    // for example: `idx:path.to.field,idx2:path2`
+    fn hack_scan_req(req: &mut ScanRequest) {
+        let Ok(raw) = std::env::var("GREPTIME_PROJECTION_NESTED_PATHS") else {
+            return;
+        };
+
+        let mut projection = Vec::new();
+        let mut nested_paths = Vec::new();
+
+        for item in raw
+            .split(',')
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+        {
+            let Some((idx_str, path_str)) = item.split_once(':') else {
+                warn!(
+                    "Ignoring invalid GREPTIME_PROJECTION_NESTED_PATHS item without ':' separator: {}",
+                    item
+                );
+                continue;
+            };
+
+            let Ok(idx) = idx_str.trim().parse::<usize>() else {
+                warn!(
+                    "Ignoring invalid GREPTIME_PROJECTION_NESTED_PATHS index: {}",
+                    idx_str
+                );
+                continue;
+            };
+
+            let path = path_str
+                .trim()
+                .split('.')
+                .map(str::trim)
+                .filter(|segment| !segment.is_empty())
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+
+            if path.is_empty() {
+                warn!(
+                    "Ignoring empty nested path in GREPTIME_PROJECTION_NESTED_PATHS item: {}",
+                    item
+                );
+                continue;
+            }
+
+            projection.push(idx);
+            nested_paths.push(path);
+        }
+
+        if projection.is_empty() {
+            return;
+        }
+
+        req.projection_input = Some(
+            ProjectionInput::new()
+                .with_projection(projection)
+                .with_nested_paths(nested_paths),
+        );
+
+        info!("projection_input hacked by env: {:?}", req.projection_input);
+    }
+
     /// Handles the scan `request` and returns a [ScanRegion].
     #[tracing::instrument(skip_all, fields(region_id = %region_id))]
-    fn scan_region(&self, region_id: RegionId, request: ScanRequest) -> Result<ScanRegion> {
+    fn scan_region(&self, region_id: RegionId, mut request: ScanRequest) -> Result<ScanRegion> {
         let query_start = Instant::now();
+        Self::hack_scan_req(&mut request);
         // Reading a region doesn't need to go through the region worker thread.
         let region = self.find_region(region_id)?;
         let version = region.version();
