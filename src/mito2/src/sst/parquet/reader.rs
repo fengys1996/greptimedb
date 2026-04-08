@@ -126,7 +126,7 @@ pub struct ParquetReaderBuilder {
     ///
     /// `None` reads all columns. Due to schema change, the projection
     /// can contain columns not in the parquet file.
-    projection: Option<Vec<ColumnId>>,
+    read_cols: Option<ReadColumns>,
     /// Strategy to cache SST data.
     cache_strategy: CacheStrategy,
     /// Index appliers.
@@ -166,7 +166,7 @@ impl ParquetReaderBuilder {
             file_handle,
             object_store,
             predicate: None,
-            projection: None,
+            read_cols: None,
             cache_strategy: CacheStrategy::Disabled,
             inverted_index_appliers: [None, None],
             bloom_filter_index_appliers: [None, None],
@@ -194,8 +194,8 @@ impl ParquetReaderBuilder {
     ///
     /// The reader only applies the projection to fields.
     #[must_use]
-    pub fn projection(mut self, projection: Option<Vec<ColumnId>>) -> ParquetReaderBuilder {
-        self.projection = projection;
+    pub fn projection(mut self, read_cols: Option<ReadColumns>) -> ParquetReaderBuilder {
+        self.read_cols = read_cols;
         self
     }
 
@@ -373,15 +373,17 @@ impl ParquetReaderBuilder {
         };
 
         let expected_meta = self.expected_metadata.as_ref().unwrap_or(&region_meta);
-        let column_ids: Vec<_> = self.projection.as_ref().cloned().unwrap_or_else(|| {
+        let read_cols = if let Some(read_cols) = &self.read_cols {
+            read_cols.clone()
+        } else {
             // Lists all column ids to read, we always use the expected metadata if possible.
-            expected_meta
-                .column_metadatas
-                .iter()
-                .map(|col| col.column_id)
-                .collect()
-        });
-        let read_cols = ReadColumns::from_column_ids(column_ids);
+            ReadColumns::from_column_ids(
+                expected_meta
+                    .column_metadatas
+                    .iter()
+                    .map(|col| col.column_id),
+            )
+        };
         let mut read_format = ReadFormat::new(
             region_meta.clone(),
             Some(read_cols),

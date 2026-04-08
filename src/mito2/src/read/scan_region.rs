@@ -56,6 +56,7 @@ use crate::read::compat::{self, CompatBatch, FlatCompatBatch, PrimaryKeyCompatBa
 use crate::read::projection::ProjectionMapper;
 use crate::read::range::{FileRangeBuilder, MemRangeBuilder, RangeMeta, RowGroupIndex};
 use crate::read::range_cache::ScanRequestFingerprint;
+use crate::read::read_columns::ReadColumns;
 use crate::read::seq_scan::SeqScan;
 use crate::read::series_scan::SeriesScan;
 use crate::read::stream::ScanBatchStream;
@@ -785,7 +786,7 @@ pub struct ScanInput {
     /// Column ids to read from memtables and SSTs.
     /// Notice this is different from the columns in `mapper` which are projected columns.
     /// But this read columns might also include non-projected columns needed for filtering.
-    pub(crate) read_column_ids: Vec<ColumnId>,
+    pub(crate) read_cols: ReadColumns,
     /// Time range filter for time index.
     pub(crate) time_range: Option<TimestampRange>,
     /// Predicate to push down.
@@ -838,7 +839,7 @@ impl ScanInput {
     pub(crate) fn new(access_layer: AccessLayerRef, mapper: ProjectionMapper) -> ScanInput {
         ScanInput {
             access_layer,
-            read_column_ids: mapper.column_ids().to_vec(),
+            read_cols: mapper.read_columns().clone(),
             mapper: Arc::new(mapper),
             time_range: None,
             predicate: PredicateGroup::default(),
@@ -1110,7 +1111,7 @@ impl ScanInput {
             .access_layer
             .read_sst(file.clone())
             .predicate(predicate)
-            .projection(Some(self.read_column_ids.clone()))
+            .projection(Some(self.read_cols.clone()))
             .cache(self.cache_strategy.clone())
             .inverted_index_appliers(self.inverted_index_appliers.clone())
             .bloom_filter_index_appliers(self.bloom_filter_index_appliers.clone())
@@ -1450,12 +1451,11 @@ pub(crate) fn build_scan_fingerprint(input: &ScanInput) -> Option<ScanRequestFin
     // Ensure the filters are sorted for consistent fingerprinting.
     filters.sort_unstable();
     time_filters.sort_unstable();
-
+    let col_ids = input.read_cols.column_ids_iter().collect::<Vec<_>>();
     Some(
         crate::read::range_cache::ScanRequestFingerprintBuilder {
-            read_column_ids: input.read_column_ids.clone(),
-            read_column_types: input
-                .read_column_ids
+            read_column_ids: col_ids.clone(),
+            read_column_types: col_ids
                 .iter()
                 .map(|id| {
                     metadata
@@ -1977,8 +1977,9 @@ mod tests {
 
         let fingerprint = build_scan_fingerprint(&input).unwrap();
 
+        let read_column_ids = input.read_cols.column_ids_iter().collect::<Vec<_>>();
         let expected = ScanRequestFingerprintBuilder {
-            read_column_ids: input.read_column_ids.clone(),
+            read_column_ids,
             read_column_types: vec![
                 metadata
                     .column_by_id(0)
@@ -2053,8 +2054,9 @@ mod tests {
         let input = new_scan_input(metadata.clone(), vec![col("k0").eq(lit("foo"))]).await;
         let fingerprint = build_scan_fingerprint(&input).unwrap();
 
+        let read_column_ids = input.read_cols.column_ids_iter().collect::<Vec<_>>();
         let expected = ScanRequestFingerprintBuilder {
-            read_column_ids: input.read_column_ids.clone(),
+            read_column_ids,
             read_column_types: vec![
                 metadata
                     .column_by_id(0)

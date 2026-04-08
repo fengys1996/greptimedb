@@ -33,7 +33,7 @@ use store_api::storage::{ColumnId, ProjectionInput};
 use crate::cache::CacheStrategy;
 use crate::error::{InvalidRequestSnafu, RecordBatchSnafu, Result};
 use crate::read::projection::{read_column_ids_from_projection, repeated_vector_with_cache};
-use crate::read::read_columns::build_read_columns;
+use crate::read::read_columns::{ReadColumns, build_read_columns};
 use crate::sst::parquet::flat_format::sst_column_id_indices;
 use crate::sst::parquet::format::FormatProjection;
 use crate::sst::{
@@ -49,11 +49,11 @@ pub struct FlatProjectionMapper {
     metadata: RegionMetadataRef,
     /// Schema for converted [RecordBatch] to return.
     output_schema: SchemaRef,
-    /// Ids of columns to read from memtables and SSTs.
+    /// The columns to read from memtables and SSTs.
     /// The mapper won't deduplicate the column ids.
     ///
     /// Note that this doesn't contain the `__table_id` and `__tsid`.
-    read_column_ids: Vec<ColumnId>,
+    read_cols: ReadColumns,
     /// Ids and DataTypes of columns of the expected batch.
     /// We can use this to check if the batch is compatible with the expected schema.
     ///
@@ -121,7 +121,8 @@ impl FlatProjectionMapper {
             &id_to_index,
             // All columns with internal columns.
             metadata.column_metadatas.len() + 3,
-            read_cols,
+            // TODO(fys): avoid cloning read column ids.
+            read_cols.clone(),
         );
 
         let batch_schema = flat_projected_columns(metadata, &format_projection);
@@ -168,7 +169,7 @@ impl FlatProjectionMapper {
         Ok(FlatProjectionMapper {
             metadata: metadata.clone(),
             output_schema,
-            read_column_ids,
+            read_cols,
             batch_schema,
             is_empty_projection,
             batch_indices,
@@ -186,10 +187,8 @@ impl FlatProjectionMapper {
         &self.metadata
     }
 
-    /// Returns ids of projected columns that we need to read
-    /// from memtables and SSTs.
-    pub(crate) fn column_ids(&self) -> &[ColumnId] {
-        &self.read_column_ids
+    pub(crate) fn read_columns(&self) -> &ReadColumns {
+        &self.read_cols
     }
 
     /// Returns the field column start index in output batch.
