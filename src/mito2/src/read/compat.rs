@@ -606,7 +606,7 @@ fn may_compat_fields(
     actual: &RegionMetadata,
 ) -> Result<Option<CompatFields>> {
     let expect_fields = mapper.batch_fields();
-    let actual_fields = Batch::projected_fields(actual, mapper.column_ids());
+    let actual_fields = Batch::projected_fields(actual, &mapper.read_columns().column_ids());
     if expect_fields == actual_fields {
         return Ok(None);
     }

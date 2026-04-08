@@ -56,6 +56,7 @@ use crate::read::compat::{self, CompatBatch, FlatCompatBatch, PrimaryKeyCompatBa
 use crate::read::projection::ProjectionMapper;
 use crate::read::range::{FileRangeBuilder, MemRangeBuilder, RangeMeta, RowGroupIndex};
 use crate::read::range_cache::ScanRequestFingerprint;
+use crate::read::read_columns::ReadColumns;
 use crate::read::seq_scan::SeqScan;
 use crate::read::series_scan::SeriesScan;
 use crate::read::stream::ScanBatchStream;
@@ -391,7 +392,26 @@ impl ScanRegion {
         let predicate = PredicateGroup::new(&self.version.metadata, &self.request.filters)?;
 
         let read_column_ids = match self.request.projection_indices() {
-            Some(p) => self.build_read_column_ids(p, &predicate)?,
+            Some(p) =>
+            // FIXME(fys): `build_read_column_ids()` only adds filter-required root
+            // columns, but nested pruning later is driven by
+            // `projection_input.nested_paths` when we build `ReadColumns`.
+            //
+            // This can under-read nested data if the projection and predicate
+            // reference different subfields under the same root column.
+            //
+            // Example:
+            //   SELECT j.a FROM t WHERE j.b = 1;
+            //
+            // In this case we add root column `j` because the predicate uses it,
+            // but if nested paths only contain `["j", "a"]`, the SST reader may
+            // prune `j` down to `j.a` and then evaluate `j.b = 1` on incomplete
+            // data. We need to either merge predicate-required nested paths into
+            // `ReadColumns`, or disable nested pruning for predicate-referenced
+            // root columns.
+            {
+                self.build_read_column_ids(p, &predicate)?
+            }
             None => self
                 .version
                 .metadata
@@ -782,10 +802,10 @@ pub struct ScanInput {
     access_layer: AccessLayerRef,
     /// Maps projected Batches to RecordBatches.
     pub(crate) mapper: Arc<ProjectionMapper>,
-    /// Column ids to read from memtables and SSTs.
+    /// The columns to read from memtables and SSTs.
     /// Notice this is different from the columns in `mapper` which are projected columns.
     /// But this read columns might also include non-projected columns needed for filtering.
-    pub(crate) read_column_ids: Vec<ColumnId>,
+    pub(crate) read_cols: ReadColumns,
     /// Time range filter for time index.
     pub(crate) time_range: Option<TimestampRange>,
     /// Predicate to push down.
@@ -838,7 +858,7 @@ impl ScanInput {
     pub(crate) fn new(access_layer: AccessLayerRef, mapper: ProjectionMapper) -> ScanInput {
         ScanInput {
             access_layer,
-            read_column_ids: mapper.column_ids().to_vec(),
+            read_cols: mapper.read_columns().clone(),
             mapper: Arc::new(mapper),
             time_range: None,
             predicate: PredicateGroup::default(),
@@ -1110,7 +1130,7 @@ impl ScanInput {
             .access_layer
             .read_sst(file.clone())
             .predicate(predicate)
-            .projection(Some(self.read_column_ids.clone()))
+            .projection(Some(self.read_cols.clone()))
             .cache(self.cache_strategy.clone())
             .inverted_index_appliers(self.inverted_index_appliers.clone())
             .bloom_filter_index_appliers(self.bloom_filter_index_appliers.clone())
@@ -1450,12 +1470,11 @@ pub(crate) fn build_scan_fingerprint(input: &ScanInput) -> Option<ScanRequestFin
     // Ensure the filters are sorted for consistent fingerprinting.
     filters.sort_unstable();
     time_filters.sort_unstable();
-
+    let read_columns = input.read_cols.clone();
     Some(
         crate::read::range_cache::ScanRequestFingerprintBuilder {
-            read_column_ids: input.read_column_ids.clone(),
-            read_column_types: input
-                .read_column_ids
+            read_column_types: read_columns
+                .column_ids()
                 .iter()
                 .map(|id| {
                     metadata
@@ -1463,6 +1482,7 @@ pub(crate) fn build_scan_fingerprint(input: &ScanInput) -> Option<ScanRequestFin
                         .map(|col| col.column_schema.data_type.clone())
                 })
                 .collect(),
+            read_columns,
             filters,
             time_filters,
             series_row_selector: input.series_row_selector,
@@ -1978,7 +1998,7 @@ mod tests {
         let fingerprint = build_scan_fingerprint(&input).unwrap();
 
         let expected = ScanRequestFingerprintBuilder {
-            read_column_ids: input.read_column_ids.clone(),
+            read_columns: input.read_cols.clone(),
             read_column_types: vec![
                 metadata
                     .column_by_id(0)
@@ -2054,7 +2074,7 @@ mod tests {
         let fingerprint = build_scan_fingerprint(&input).unwrap();
 
         let expected = ScanRequestFingerprintBuilder {
-            read_column_ids: input.read_column_ids.clone(),
+            read_columns: input.read_cols.clone(),
             read_column_types: vec![
                 metadata
                     .column_by_id(0)

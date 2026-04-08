@@ -55,7 +55,7 @@ use crate::error::{InvalidRequestSnafu, Result};
 /// ```
 ///
 /// If `nested_paths` is empty, the whole column will be read.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ReadColumns {
     cols: Vec<ReadColumn>,
 }
@@ -80,12 +80,16 @@ impl ReadColumns {
         self.cols.iter().map(|column| column.column_id())
     }
 
+    pub fn column_ids(&self) -> Vec<ColumnId> {
+        self.column_ids_iter().collect()
+    }
+
     pub fn columns(&self) -> &[ReadColumn] {
         &self.cols
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ReadColumn {
     column_id: ColumnId,
     /// Nested filed paths under this column.
