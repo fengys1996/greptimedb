@@ -1451,10 +1451,11 @@ pub(crate) fn build_scan_fingerprint(input: &ScanInput) -> Option<ScanRequestFin
     // Ensure the filters are sorted for consistent fingerprinting.
     filters.sort_unstable();
     time_filters.sort_unstable();
-    let read_column_ids = input.read_cols.column_ids();
+    let read_columns = input.read_cols.clone();
     Some(
         crate::read::range_cache::ScanRequestFingerprintBuilder {
-            read_column_types: read_column_ids
+            read_column_types: read_columns
+                .column_ids()
                 .iter()
                 .map(|id| {
                     metadata
@@ -1462,7 +1463,7 @@ pub(crate) fn build_scan_fingerprint(input: &ScanInput) -> Option<ScanRequestFin
                         .map(|col| col.column_schema.data_type.clone())
                 })
                 .collect(),
-            read_column_ids,
+            read_columns,
             filters,
             time_filters,
             series_row_selector: input.series_row_selector,
@@ -1978,7 +1979,7 @@ mod tests {
         let fingerprint = build_scan_fingerprint(&input).unwrap();
 
         let expected = ScanRequestFingerprintBuilder {
-            read_column_ids: input.read_cols.column_ids(),
+            read_columns: input.read_cols.clone(),
             read_column_types: vec![
                 metadata
                     .column_by_id(0)
@@ -2054,7 +2055,7 @@ mod tests {
         let fingerprint = build_scan_fingerprint(&input).unwrap();
 
         let expected = ScanRequestFingerprintBuilder {
-            read_column_ids: input.read_cols.column_ids(),
+            read_columns: input.read_cols.clone(),
             read_column_types: vec![
                 metadata
                     .column_by_id(0)
