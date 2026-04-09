@@ -391,6 +391,14 @@ impl ScanRegion {
         let time_range = self.build_time_range_predicate();
         let predicate = PredicateGroup::new(&self.version.metadata, &self.request.filters)?;
 
+        // TODO(fys):
+        // 1. build read columns from projection input.
+        // 2. build read columns from predicate.
+        // 3. merge final read columns for read sst logically.
+
+        // TODO(fys):
+        // 1. compute output schema via read columns from projection input.
+
         let read_column_ids = match self.request.projection_indices() {
             Some(p) =>
             // FIXME(fys): `build_read_column_ids()` only adds filter-required root
