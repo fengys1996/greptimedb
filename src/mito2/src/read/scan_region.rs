@@ -56,7 +56,9 @@ use crate::read::compat::{self, CompatBatch, FlatCompatBatch, PrimaryKeyCompatBa
 use crate::read::projection::ProjectionMapper;
 use crate::read::range::{FileRangeBuilder, MemRangeBuilder, RangeMeta, RowGroupIndex};
 use crate::read::range_cache::ScanRequestFingerprint;
-use crate::read::read_columns::ReadColumns;
+use crate::read::read_columns::{
+    ReadColumns, merge_read_cols, read_columns_from_predicate, read_columns_from_projection,
+};
 use crate::read::seq_scan::SeqScan;
 use crate::read::series_scan::SeriesScan;
 use crate::read::stream::ScanBatchStream;
@@ -395,6 +397,11 @@ impl ScanRegion {
         // 1. build read columns from projection input.
         // 2. build read columns from predicate.
         // 3. merge final read columns for read sst logically.
+        //
+        // Note: we can modify the nested_paths in the projection input via
+        // try-swapping with projection or other techniques to reduce I/O when
+        // reading from the underlying SSTs. This also affects the schema of the
+        // data passed to DataFusion.
 
         // TODO(fys):
         // 1. compute output schema via read columns from projection input.
@@ -418,6 +425,12 @@ impl ScanRegion {
             // `ReadColumns`, or disable nested pruning for predicate-referenced
             // root columns.
             {
+                let metadata = &self.version.metadata;
+                let read_columns_from_projection =
+                    read_columns_from_projection(projection, metadata);
+                let read_columns_from_predicate = read_columns_from_predicate(&predicate, metadata);
+                let _final_read_columns =
+                    merge_read_cols(read_columns_from_projection, read_columns_from_predicate);
                 self.build_read_column_ids(p, &predicate)?
             }
             None => self

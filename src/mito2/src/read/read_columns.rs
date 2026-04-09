@@ -17,9 +17,10 @@ use std::collections::BTreeMap;
 use datafusion_common::HashMap;
 use snafu::OptionExt;
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::{ColumnId, NestedPath};
+use store_api::storage::{ColumnId, NestedPath, ProjectionInput};
 
 use crate::error::{InvalidRequestSnafu, Result};
+use crate::read::scan_region::PredicateGroup;
 
 /// Logical columns to read from a region.
 ///
@@ -206,6 +207,22 @@ fn merge_nested_paths(merged: &mut Vec<NestedPath>, incoming: Vec<NestedPath>) {
         merged.retain(|existing| !existing.starts_with(path.as_slice()));
         merged.push(path);
     }
+}
+
+/// Build [`ReadColumns`] from [`ProjectionInput`].
+pub fn read_columns_from_projection(
+    _projection: &ProjectionInput,
+    _metadata: &RegionMetadataRef,
+) -> ReadColumns {
+    todo!()
+}
+
+/// Build [`ReadColumns`] from [`ProjectionInput`].
+pub fn read_columns_from_predicate(
+    _predicate: &PredicateGroup,
+    _metadata: &RegionMetadataRef,
+) -> ReadColumns {
+    todo!()
 }
 
 #[cfg(test)]
