@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::BTreeMap;
+
 use datafusion_common::HashMap;
 use snafu::OptionExt;
 use store_api::metadata::RegionMetadataRef;
@@ -157,4 +159,166 @@ pub fn build_read_columns(
     }
 
     Ok(ReadColumns { cols })
+}
+
+pub fn merge_read_cols(a: ReadColumns, b: ReadColumns) -> ReadColumns {
+    let mut merged = BTreeMap::<u32, Vec<NestedPath>>::new();
+
+    for col in a.cols.into_iter().chain(b.cols) {
+        if let Some(nested_paths) = merged.get_mut(&col.column_id) {
+            if nested_paths.is_empty() || col.nested_paths.is_empty() {
+                *nested_paths = vec![];
+            } else {
+                merge_nested_paths(nested_paths, col.nested_paths);
+            }
+            continue;
+        }
+
+        merged.insert(col.column_id, normalize_nested_paths(col.nested_paths));
+    }
+
+    ReadColumns {
+        cols: merged
+            .into_iter()
+            .map(|(column_id, nested_paths)| ReadColumn {
+                column_id,
+                nested_paths,
+            })
+            .collect(),
+    }
+}
+
+fn normalize_nested_paths(nested_paths: Vec<NestedPath>) -> Vec<NestedPath> {
+    let mut normalized = Vec::with_capacity(nested_paths.len());
+    merge_nested_paths(&mut normalized, nested_paths);
+    normalized
+}
+
+fn merge_nested_paths(merged: &mut Vec<NestedPath>, incoming: Vec<NestedPath>) {
+    for path in incoming {
+        if merged
+            .iter()
+            .any(|existing| path.starts_with(existing.as_slice()))
+        {
+            continue;
+        }
+
+        merged.retain(|existing| !existing.starts_with(path.as_slice()));
+        merged.push(path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn nested_path(parts: &[&str]) -> NestedPath {
+        parts.iter().map(|part| (*part).to_string()).collect()
+    }
+
+    #[test]
+    fn test_merge_read_cols_with_only_root() {
+        let a = ReadColumns {
+            cols: vec![ReadColumn::new(3, vec![]), ReadColumn::new(1, vec![])],
+        };
+        let b = ReadColumns {
+            cols: vec![ReadColumn::new(2, vec![])],
+        };
+
+        let merged = merge_read_cols(a, b);
+
+        assert_eq!(
+            merged,
+            ReadColumns {
+                cols: vec![
+                    ReadColumn::new(1, vec![]),
+                    ReadColumn::new(2, vec![]),
+                    ReadColumn::new(3, vec![]),
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn test_merge_read_cols_with_nested_paths() {
+        let a = ReadColumns {
+            cols: vec![ReadColumn::new(1, vec![nested_path(&["j", "a"])])],
+        };
+        let b = ReadColumns {
+            cols: vec![ReadColumn::new(
+                1,
+                vec![nested_path(&["j", "b"]), nested_path(&["j", "c"])],
+            )],
+        };
+
+        let merged = merge_read_cols(a, b);
+
+        assert_eq!(
+            merged,
+            ReadColumns {
+                cols: vec![ReadColumn::new(
+                    1,
+                    vec![
+                        nested_path(&["j", "a"]),
+                        nested_path(&["j", "b"]),
+                        nested_path(&["j", "c"]),
+                    ],
+                )],
+            }
+        );
+    }
+
+    #[test]
+    fn test_merge_read_cols_with_column_override() {
+        let a = ReadColumns {
+            cols: vec![
+                ReadColumn::new(1, vec![nested_path(&["j", "a"])]),
+                ReadColumn::new(2, vec![nested_path(&["k", "b"])]),
+            ],
+        };
+        let b = ReadColumns {
+            cols: vec![
+                ReadColumn::new(1, vec![]),
+                ReadColumn::new(2, vec![nested_path(&["k", "b", "c"])]),
+            ],
+        };
+
+        let merged = merge_read_cols(a, b);
+
+        assert_eq!(
+            merged,
+            ReadColumns {
+                cols: vec![
+                    ReadColumn::new(1, vec![]),
+                    ReadColumn::new(2, vec![nested_path(&["k", "b"])])
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn test_merge_read_cols_dedups_redundant_nested_paths() {
+        let a = ReadColumns {
+            cols: vec![ReadColumn::new(
+                1,
+                vec![
+                    nested_path(&["j", "a", "b"]),
+                    nested_path(&["j", "a"]),
+                    nested_path(&["j", "a", "b", "c"]),
+                ],
+            )],
+        };
+        let b = ReadColumns {
+            cols: vec![ReadColumn::new(1, vec![nested_path(&["j", "a"])])],
+        };
+
+        let merged = merge_read_cols(a, b);
+
+        assert_eq!(
+            merged,
+            ReadColumns {
+                cols: vec![ReadColumn::new(1, vec![nested_path(&["j", "a"])])],
+            }
+        );
+    }
 }

@@ -298,7 +298,9 @@ impl FlatProjectionMapper {
             // TODO(fys): remove this after we fix the schema mismatch issue.
             else {
                 let target_schema = self.output_schema.arrow_schema();
-                if *target_schema != batch.schema() {
+                if target_schema.field(output_idx).data_type()
+                    != batch.schema().field(*index).data_type()
+                {
                     common_telemetry::info!(
                         "Casting column {} from type {} to {} since the batch schema doesn't match the output schema",
                         self.output_schema.column_schemas()[output_idx].name,
