@@ -62,12 +62,6 @@ impl ProjectionMapper {
     /// Returns a new mapper with output projection and explicit read columns.
     pub fn new_with_read_columns(
         metadata: &RegionMetadataRef,
-        // TODO(fys): We derive read columns from both the predicate and the
-        // projection input, and then merge them. For example, if the projection
-        // input yields 1:[["j","a","b"]] while the predicate yields 1:[["j"]],
-        // the merged result becomes 1:[["j"]]. Therefore, we cannot rely solely
-        // on the nested paths from the projection input to prune nested data
-        // types.
         output_cols: impl Into<ReadColumns>,
         read_cols: impl Into<ReadColumns>,
     ) -> Result<Self> {

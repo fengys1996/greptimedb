@@ -393,38 +393,16 @@ impl ScanRegion {
         let time_range = self.build_time_range_predicate();
         let predicate = PredicateGroup::new(&self.version.metadata, &self.request.filters)?;
 
-        // TODO(fys):
-        // 1. build read columns from projection input.
-        // 2. build read columns from predicate.
-        // 3. merge final read columns for read sst logically.
-        //
-        // Note: we can modify the nested_paths in the projection input via
-        // try-swapping with projection or other techniques to reduce I/O when
-        // reading from the underlying SSTs. This also affects the schema of the
-        // data passed to DataFusion.
-
-        // TODO(fys):
-        // 1. compute output schema via read columns from projection input.
-
         let (output_cols, read_cols) = match &self.request.projection_input {
-            Some(p) =>
-            // FIXME(fys): predicate expansion currently only adds filter-required
-            // root columns, but nested pruning later is driven by
-            // `projection_input.nested_paths` when we build `ReadColumns`.
-            //
-            // This can under-read nested data if the projection and predicate
-            // reference different subfields under the same root column.
-            //
-            // Example:
-            //   SELECT j.a FROM t WHERE j.b = 1;
-            //
-            // In this case we add root column `j` because the predicate uses it,
-            // but if nested paths only contain `["j", "a"]`, the SST reader may
-            // prune `j` down to `j.a` and then evaluate `j.b = 1` on incomplete
-            // data. We need to either merge predicate-required nested paths into
-            // `ReadColumns`, or disable nested pruning for predicate-referenced
-            // root columns.
-            {
+            Some(p) => {
+                // 1. build read columns from projection input.
+                // 2. build read columns from predicate.
+                // 3. merge final read columns for read sst logically.
+                //
+                // Note: we can modify the nested_paths in the projection input via
+                // try-swapping with projection or other techniques to reduce I/O when
+                // reading from the underlying SSTs. This also affects the schema of the
+                // data passed to DataFusion.
                 let metadata = &self.version.metadata;
                 let output_cols = read_columns_from_projection(p, metadata)?;
                 let from_predicate = read_columns_from_predicate(&predicate, metadata);

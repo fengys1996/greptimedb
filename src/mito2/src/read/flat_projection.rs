@@ -114,9 +114,6 @@ impl FlatProjectionMapper {
         // Creates a map to lookup index.
         let id_to_index = sst_column_id_indices(metadata);
 
-        // FIXME(fys): use correct nested paths.
-        // let read_cols =
-        //     build_read_columns(metadata, &projection_input.nested_paths, &read_column_ids)?;
         // TODO(yingwen): Support different flat schema options.
         let format_projection = FormatProjection::compute_format_projection(
             &id_to_index,
