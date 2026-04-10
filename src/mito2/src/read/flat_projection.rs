@@ -35,7 +35,7 @@ use store_api::storage::{ColumnId, ProjectionInput};
 use crate::cache::CacheStrategy;
 use crate::error::{InvalidRequestSnafu, RecordBatchSnafu, Result};
 use crate::read::projection::{read_column_ids_from_projection, repeated_vector_with_cache};
-use crate::read::read_columns::{ReadColumns, build_read_columns};
+use crate::read::read_columns::ReadColumns;
 use crate::sst::parquet::flat_format::sst_column_id_indices;
 use crate::sst::parquet::format::FormatProjection;
 use crate::sst::{
@@ -81,7 +81,13 @@ impl FlatProjectionMapper {
         let projection: Vec<_> = projection.collect();
         let read_column_ids = read_column_ids_from_projection(metadata, &projection)?;
         let projection_input = ProjectionInput::new().with_projection(projection);
-        Self::new_with_read_columns(metadata, projection_input, read_column_ids)
+        Self::new_with_read_columns(
+            metadata,
+            projection_input,
+            read_column_ids,
+            Default::default(),
+            Default::default(),
+        )
     }
 
     /// Returns a new mapper with output projection and explicit read columns.
@@ -89,11 +95,28 @@ impl FlatProjectionMapper {
         metadata: &RegionMetadataRef,
         projection_input: ProjectionInput,
         // TODO(fys): make read_column_ids to ReadColumns
-        read_column_ids: Vec<ColumnId>,
+        _read_column_ids: Vec<ColumnId>,
+        output_cols: ReadColumns,
+        read_cols: ReadColumns,
     ) -> Result<Self> {
         let projection = projection_input.projection;
         // If the original projection is empty.
         let is_empty_projection = projection.is_empty();
+
+        let mut col_schemas = Vec::with_capacity(projection.len());
+        for read_col in output_cols.columns() {
+            let col_id = read_col.column_id();
+            let col = metadata
+                .column_by_id(col_id)
+                .with_context(|| InvalidRequestSnafu {
+                    region_id: metadata.region_id,
+                    reason: format!("col id {} is invalid", col_id),
+                })?;
+            // TODO(fys): try use col.nested path to prune the column schema
+            // if it is a nested field.
+            let col_schema = col.column_schema.clone();
+            col_schemas.push(col_schema);
+        }
 
         // Output column schemas for the projection.
         let mut column_schemas = Vec::with_capacity(projection.len());
@@ -119,8 +142,8 @@ impl FlatProjectionMapper {
         let id_to_index = sst_column_id_indices(metadata);
 
         // FIXME(fys): use correct nested paths.
-        let read_cols =
-            build_read_columns(metadata, &projection_input.nested_paths, &read_column_ids)?;
+        // let read_cols =
+        //     build_read_columns(metadata, &projection_input.nested_paths, &read_column_ids)?;
         // TODO(yingwen): Support different flat schema options.
         let format_projection = FormatProjection::compute_format_projection(
             &id_to_index,
@@ -480,6 +503,8 @@ impl CompactionProjectionMapper {
                 .iter()
                 .map(|col| col.column_id)
                 .collect(),
+            Default::default(),
+            Default::default(),
         )?;
         let assembler = DfBatchAssembler::new(mapper.output_schema());
 

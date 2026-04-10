@@ -70,14 +70,16 @@ impl ProjectionMapper {
         // on the nested paths from the projection input to prune nested data
         // types.
         read_column_ids: Vec<ColumnId>,
-        _output_cols: ReadColumns,
-        _read_cols: ReadColumns,
+        output_cols: ReadColumns,
+        read_cols: ReadColumns,
     ) -> Result<Self> {
         Ok(ProjectionMapper::Flat(
             FlatProjectionMapper::new_with_read_columns(
                 metadata,
                 projection_input,
                 read_column_ids,
+                output_cols,
+                read_cols,
             )?,
         ))
     }

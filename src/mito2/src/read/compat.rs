@@ -1304,6 +1304,8 @@ mod tests {
             &expected_metadata,
             projection_input,
             vec![1, 2, 3],
+            Default::default(),
+            Default::default(),
         )
         .unwrap();
         let read_cols = ReadColumns::from_column_ids([1, 2, 3]);
