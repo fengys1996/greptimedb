@@ -62,15 +62,11 @@ impl ProjectionMapper {
     /// Returns a new mapper with output projection and explicit read columns.
     pub fn new_with_read_columns(
         metadata: &RegionMetadataRef,
-        projection_input: ProjectionInput,
-        read_column_ids: Vec<ColumnId>,
+        output_cols: impl Into<ReadColumns>,
+        read_cols: impl Into<ReadColumns>,
     ) -> Result<Self> {
         Ok(ProjectionMapper::Flat(
-            FlatProjectionMapper::new_with_read_columns(
-                metadata,
-                projection_input,
-                read_column_ids,
-            )?,
+            FlatProjectionMapper::new_with_read_columns(metadata, output_cols, read_cols)?,
         ))
     }
 
@@ -469,6 +465,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::read::read_columns::read_columns_from_projection;
 
     fn print_record_batch(record_batch: RecordBatch) -> String {
         pretty::pretty_format_batches(&[record_batch.into_df_record_batch()])
@@ -662,9 +659,9 @@ mod tests {
         let cache = CacheStrategy::Disabled;
         // Output columns v1, k0. Read also includes v0.
         let projection_input = ProjectionInput::new().with_projection(vec![4, 1]);
+        let output_cols = read_columns_from_projection(&projection_input, &metadata).unwrap();
         let mapper =
-            ProjectionMapper::new_with_read_columns(&metadata, projection_input, vec![4, 1, 3])
-                .unwrap();
+            ProjectionMapper::new_with_read_columns(&metadata, output_cols, vec![4, 1, 3]).unwrap();
         assert_eq!(vec![4, 1, 3], mapper.read_columns().column_ids());
 
         let batch = new_flat_batch(None, &[(1, 1)], &[(3, 3), (4, 4)], 3);

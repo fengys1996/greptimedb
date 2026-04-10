@@ -990,7 +990,7 @@ mod tests {
 
     use super::*;
     use crate::read::flat_projection::FlatProjectionMapper;
-    use crate::read::read_columns::ReadColumns;
+    use crate::read::read_columns::{ReadColumns, read_columns_from_projection};
     use crate::sst::parquet::flat_format::FlatReadFormat;
     use crate::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
 
@@ -1300,9 +1300,11 @@ mod tests {
 
         // Output projection: tag_1, field_2. Read also includes field_3.
         let projection_input = ProjectionInput::new().with_projection(vec![1, 2]);
+        let output_cols =
+            read_columns_from_projection(&projection_input, &expected_metadata).unwrap();
         let mapper = FlatProjectionMapper::new_with_read_columns(
             &expected_metadata,
-            projection_input,
+            output_cols,
             vec![1, 2, 3],
         )
         .unwrap();
