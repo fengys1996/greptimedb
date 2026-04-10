@@ -34,11 +34,11 @@ use datafusion_expr::utils::expr_to_columns;
 use futures::StreamExt;
 use partition::expr::PartitionExpr;
 use smallvec::SmallVec;
-use snafu::{OptionExt as _, ResultExt};
+use snafu::ResultExt;
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::region_engine::{PartitionRange, RegionScannerRef};
 use store_api::storage::{
-    ColumnId, RegionId, ScanRequest, SequenceRange, TimeSeriesDistribution, TimeSeriesRowSelector,
+    RegionId, ScanRequest, SequenceRange, TimeSeriesDistribution, TimeSeriesRowSelector,
 };
 use table::predicate::{Predicate, build_time_range_predicate, extract_time_range_from_expr};
 use tokio::sync::{Semaphore, mpsc};
@@ -47,7 +47,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheStrategy;
 use crate::config::DEFAULT_MAX_CONCURRENT_SCAN_FILES;
-use crate::error::{InvalidPartitionExprSnafu, InvalidRequestSnafu, Result};
+use crate::error::{InvalidPartitionExprSnafu, Result};
 #[cfg(feature = "enterprise")]
 use crate::extension::{BoxedExtensionRange, BoxedExtensionRangeProvider};
 use crate::memtable::{MemtableRange, RangesOptions};
@@ -1810,27 +1810,13 @@ mod tests {
     use datatypes::value::Value;
     use partition::expr::col as partition_col;
     use store_api::metadata::RegionMetadataBuilder;
-    use store_api::storage::{
-        ProjectionInput, ScanRequest, TimeSeriesDistribution, TimeSeriesRowSelector,
-    };
+    use store_api::storage::{TimeSeriesDistribution, TimeSeriesRowSelector};
 
     use super::*;
     use crate::cache::CacheManager;
-    use crate::memtable::time_partition::TimePartitions;
     use crate::read::range_cache::ScanRequestFingerprintBuilder;
-    use crate::region::version::VersionBuilder;
-    use crate::test_util::memtable_util::{EmptyMemtableBuilder, metadata_with_primary_key};
+    use crate::test_util::memtable_util::metadata_with_primary_key;
     use crate::test_util::scheduler_util::SchedulerEnv;
-
-    fn new_version(metadata: RegionMetadataRef) -> VersionRef {
-        let mutable = Arc::new(TimePartitions::new(
-            metadata.clone(),
-            Arc::new(EmptyMemtableBuilder::default()),
-            0,
-            None,
-        ));
-        Arc::new(VersionBuilder::new(metadata, mutable).build())
-    }
 
     async fn new_scan_input(metadata: RegionMetadataRef, filters: Vec<Expr>) -> ScanInput {
         let env = SchedulerEnv::new().await;
