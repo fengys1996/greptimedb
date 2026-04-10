@@ -69,10 +69,10 @@ impl ProjectionMapper {
         // the merged result becomes 1:[["j"]]. Therefore, we cannot rely solely
         // on the nested paths from the projection input to prune nested data
         // types.
-        read_column_ids: Vec<ColumnId>,
         output_cols: ReadColumns,
         read_cols: ReadColumns,
     ) -> Result<Self> {
+        let read_column_ids = read_cols.column_ids();
         Ok(ProjectionMapper::Flat(
             FlatProjectionMapper::new_with_read_columns(
                 metadata,
@@ -675,7 +675,6 @@ mod tests {
         let mapper = ProjectionMapper::new_with_read_columns(
             &metadata,
             projection_input,
-            vec![4, 1, 3],
             Default::default(),
             Default::default(),
         )

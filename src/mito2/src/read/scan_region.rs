@@ -450,7 +450,6 @@ impl ScanRegion {
             Some(projection_input) => ProjectionMapper::new_with_read_columns(
                 &self.version.metadata,
                 projection_input.clone(),
-                read_column_ids.clone(),
                 output_cols,
                 read_cols,
             )?,
