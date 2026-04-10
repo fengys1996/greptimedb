@@ -406,7 +406,7 @@ impl ScanRegion {
         // TODO(fys):
         // 1. compute output schema via read columns from projection input.
 
-        let read_column_ids = match self.request.projection_indices() {
+        let (output_cols, read_cols) = match &self.request.projection_input {
             Some(p) =>
             // FIXME(fys): `build_read_column_ids()` only adds filter-required root
             // columns, but nested pruning later is driven by
@@ -426,19 +426,24 @@ impl ScanRegion {
             // root columns.
             {
                 let metadata = &self.version.metadata;
-                let from_projection = read_columns_from_projection(projection, metadata);
+                let output_cols = read_columns_from_projection(p, metadata);
                 let from_predicate = read_columns_from_predicate(&predicate, metadata);
-                let _final_read_columns = merge_read_cols(from_projection, from_predicate);
-                self.build_read_column_ids(p, &predicate)?
+                let read_cols = merge_read_cols(output_cols.clone(), from_predicate);
+                (output_cols, read_cols)
             }
-            None => self
-                .version
-                .metadata
-                .column_metadatas
-                .iter()
-                .map(|col| col.column_id)
-                .collect(),
+            None => {
+                let read_col_ids: Vec<_> = self
+                    .version
+                    .metadata
+                    .column_metadatas
+                    .iter()
+                    .map(|col| col.column_id)
+                    .collect();
+                let output_cols = ReadColumns::from_column_ids(read_col_ids);
+                (output_cols.clone(), output_cols)
+            }
         };
+        let read_column_ids = read_cols.column_ids();
 
         // The mapper always computes projected column ids as the schema of SSTs may change.
         let mapper = match self.request.projection_input.as_ref() {
@@ -446,6 +451,8 @@ impl ScanRegion {
                 &self.version.metadata,
                 projection_input.clone(),
                 read_column_ids.clone(),
+                output_cols,
+                read_cols,
             )?,
             None => ProjectionMapper::all(&self.version.metadata)?,
         };
@@ -598,6 +605,7 @@ impl ScanRegion {
     }
 
     /// Return all columns id to read according to the projection and filters.
+    #[allow(dead_code)]
     fn build_read_column_ids(
         &self,
         projection: &[usize],

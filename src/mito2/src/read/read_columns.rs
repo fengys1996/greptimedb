@@ -58,7 +58,7 @@ use crate::read::scan_region::PredicateGroup;
 /// ```
 ///
 /// If `nested_paths` is empty, the whole column will be read.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
 pub struct ReadColumns {
     cols: Vec<ReadColumn>,
 }

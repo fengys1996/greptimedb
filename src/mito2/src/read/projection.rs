@@ -70,6 +70,8 @@ impl ProjectionMapper {
         // on the nested paths from the projection input to prune nested data
         // types.
         read_column_ids: Vec<ColumnId>,
+        _output_cols: ReadColumns,
+        _read_cols: ReadColumns,
     ) -> Result<Self> {
         Ok(ProjectionMapper::Flat(
             FlatProjectionMapper::new_with_read_columns(
@@ -668,9 +670,14 @@ mod tests {
         let cache = CacheStrategy::Disabled;
         // Output columns v1, k0. Read also includes v0.
         let projection_input = ProjectionInput::new().with_projection(vec![4, 1]);
-        let mapper =
-            ProjectionMapper::new_with_read_columns(&metadata, projection_input, vec![4, 1, 3])
-                .unwrap();
+        let mapper = ProjectionMapper::new_with_read_columns(
+            &metadata,
+            projection_input,
+            vec![4, 1, 3],
+            Default::default(),
+            Default::default(),
+        )
+        .unwrap();
         assert_eq!(vec![4, 1, 3], mapper.read_columns().column_ids());
 
         let batch = new_flat_batch(None, &[(1, 1)], &[(3, 3), (4, 4)], 3);
