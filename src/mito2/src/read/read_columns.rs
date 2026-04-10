@@ -117,6 +117,12 @@ impl ReadColumn {
     }
 }
 
+impl From<Vec<ColumnId>> for ReadColumns {
+    fn from(col_ids: Vec<ColumnId>) -> Self {
+        ReadColumns::from_column_ids(col_ids)
+    }
+}
+
 /// Builds the final read columns.
 ///
 /// `read_column_ids` determines which root columns to read and in what order.
