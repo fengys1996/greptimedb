@@ -665,7 +665,7 @@ mod tests {
         let cache = CacheStrategy::Disabled;
         // Output columns v1, k0. Read also includes v0.
         let projection_input = ProjectionInput::new().with_projection(vec![4, 1]);
-        let output_cols = read_columns_from_projection(&projection_input, &metadata);
+        let output_cols = read_columns_from_projection(&projection_input, &metadata).unwrap();
         let mapper =
             ProjectionMapper::new_with_read_columns(&metadata, output_cols, vec![4, 1, 3]).unwrap();
         assert_eq!(vec![4, 1, 3], mapper.read_columns().column_ids());

@@ -1300,7 +1300,8 @@ mod tests {
 
         // Output projection: tag_1, field_2. Read also includes field_3.
         let projection_input = ProjectionInput::new().with_projection(vec![1, 2]);
-        let output_cols = read_columns_from_projection(&projection_input, &expected_metadata);
+        let output_cols =
+            read_columns_from_projection(&projection_input, &expected_metadata).unwrap();
         let mapper = FlatProjectionMapper::new_with_read_columns(
             &expected_metadata,
             output_cols,

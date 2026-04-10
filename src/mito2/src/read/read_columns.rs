@@ -216,11 +216,66 @@ fn merge_nested_paths(merged: &mut Vec<NestedPath>, incoming: Vec<NestedPath>) {
 }
 
 /// Build [`ReadColumns`] from [`ProjectionInput`].
+///
+/// Note: If `projection.projection` is empty, this function still reads the
+/// time index column so the scan can preserve row counts for empty-output
+/// queries such as `SELECT COUNT(*)`.
 pub fn read_columns_from_projection(
-    _projection: &ProjectionInput,
-    _metadata: &RegionMetadataRef,
-) -> ReadColumns {
-    todo!()
+    projection: &ProjectionInput,
+    metadata: &RegionMetadataRef,
+) -> Result<ReadColumns> {
+    let root_indices = if projection.projection.is_empty() {
+        vec![metadata.time_index_column_pos()]
+    } else {
+        projection.projection.clone()
+    };
+
+    let col_ids = root_indices
+        .iter()
+        .map(|idx| {
+            metadata
+                .column_metadatas
+                .get(*idx)
+                .with_context(|| InvalidRequestSnafu {
+                    region_id: metadata.region_id,
+                    reason: format!("projection index {} is out of bound", idx),
+                })
+                .map(|col| col.column_id)
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let mut paths_by_col: HashMap<String, Vec<NestedPath>> = HashMap::new();
+    for path in &projection.nested_paths {
+        let Some((root_name, _)) = path.split_first() else {
+            continue;
+        };
+        paths_by_col
+            .entry(root_name.clone())
+            .or_default()
+            .push(path.clone());
+    }
+
+    let mut cols = Vec::with_capacity(col_ids.len());
+    for column_id in col_ids {
+        let col = metadata
+            .column_by_id(column_id)
+            .with_context(|| InvalidRequestSnafu {
+                region_id: metadata.region_id,
+                reason: format!("read column id {} does not exist in metadata", column_id),
+            })?;
+
+        let nested_paths = paths_by_col
+            .get(&col.column_schema.name)
+            .cloned()
+            .unwrap_or_default();
+
+        cols.push(ReadColumn {
+            column_id,
+            nested_paths,
+        });
+    }
+
+    Ok(ReadColumns { cols })
 }
 
 /// Build [`ReadColumns`] from [`ProjectionInput`].
@@ -233,10 +288,76 @@ pub fn read_columns_from_predicate(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use api::v1::SemanticType;
+    use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::ColumnSchema;
+    use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
+    use store_api::storage::RegionId;
+
     use super::*;
 
-    fn nested_path(parts: &[&str]) -> NestedPath {
-        parts.iter().map(|part| (*part).to_string()).collect()
+    #[test]
+    fn test_read_columns_from_empty_projection() {
+        let metadata = new_test_metadata();
+
+        let read_columns =
+            read_columns_from_projection(&ProjectionInput::default(), &metadata).unwrap();
+
+        let expected = ReadColumns {
+            cols: vec![ReadColumn::new(2, vec![])],
+        };
+        assert_eq!(expected, read_columns);
+
+        let projection_input =
+            ProjectionInput::new().with_nested_paths(vec![vec!["1".to_string()]]);
+        let read_columns = read_columns_from_projection(&projection_input, &metadata).unwrap();
+
+        let expected = ReadColumns {
+            cols: vec![ReadColumn::new(2, vec![])],
+        };
+        assert_eq!(expected, read_columns);
+    }
+
+    #[test]
+    fn test_read_columns_from_projection_with_nested_paths() {
+        let metadata = new_test_metadata();
+        let projection = ProjectionInput::new()
+            .with_projection(vec![1, 0])
+            .with_nested_paths(vec![
+                nested_path(&["field_0", "a"]),
+                nested_path(&["field_0", "b", "c"]),
+            ]);
+
+        let read_columns = read_columns_from_projection(&projection, &metadata).unwrap();
+
+        let expected = ReadColumns {
+            cols: vec![
+                ReadColumn::new(
+                    3,
+                    vec![
+                        nested_path(&["field_0", "a"]),
+                        nested_path(&["field_0", "b", "c"]),
+                    ],
+                ),
+                ReadColumn::new(0, vec![]),
+            ],
+        };
+        assert_eq!(expected, read_columns,);
+    }
+
+    #[test]
+    fn test_read_columns_from_projection_out_of_bound() {
+        let metadata = new_test_metadata();
+        let projection = ProjectionInput::new().with_projection(vec![3]);
+
+        let err = read_columns_from_projection(&projection, &metadata).unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("projection index 3 is out of bound")
+        );
     }
 
     #[test]
@@ -343,5 +464,43 @@ mod tests {
                 cols: vec![ReadColumn::new(1, vec![nested_path(&["j", "a"])])],
             }
         );
+    }
+
+    fn new_test_metadata() -> RegionMetadataRef {
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 1));
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "tag_0".to_string(),
+                    ConcreteDataType::string_datatype(),
+                    true,
+                ),
+                semantic_type: SemanticType::Tag,
+                column_id: 0,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "field_0".to_string(),
+                    ConcreteDataType::string_datatype(),
+                    true,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 3,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts".to_string(),
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 2,
+            });
+        builder.primary_key(vec![0]);
+        Arc::new(builder.build().unwrap())
+    }
+
+    fn nested_path(parts: &[&str]) -> NestedPath {
+        parts.iter().map(|part| (*part).to_string()).collect()
     }
 }

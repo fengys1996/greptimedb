@@ -426,7 +426,7 @@ impl ScanRegion {
             // root columns.
             {
                 let metadata = &self.version.metadata;
-                let output_cols = read_columns_from_projection(p, metadata);
+                let output_cols = read_columns_from_projection(p, metadata)?;
                 let from_predicate = read_columns_from_predicate(&predicate, metadata);
                 let read_cols = merge_read_cols(output_cols.clone(), from_predicate);
                 (output_cols, read_cols)

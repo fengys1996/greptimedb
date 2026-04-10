@@ -81,7 +81,7 @@ impl FlatProjectionMapper {
         let projection: Vec<_> = projection.collect();
         let read_column_ids = read_column_ids_from_projection(metadata, &projection)?;
         let projection_input = ProjectionInput::new().with_projection(projection);
-        let output_cols = read_columns_from_projection(&projection_input, metadata);
+        let output_cols = read_columns_from_projection(&projection_input, metadata)?;
         Self::new_with_read_columns(metadata, output_cols, read_column_ids)
     }
 
@@ -475,7 +475,7 @@ impl CompactionProjectionMapper {
         let output_cols = read_columns_from_projection(
             &ProjectionInput::new().with_projection(projection),
             metadata,
-        );
+        )?;
         let mapper =
             FlatProjectionMapper::new_with_read_columns(metadata, output_cols, read_column_ids)?;
         let assembler = DfBatchAssembler::new(mapper.output_schema());
