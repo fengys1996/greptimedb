@@ -269,7 +269,6 @@ pub trait Memtable: Send + Sync + fmt::Debug {
     /// The returned map contains the range id and the range after applying the predicate.
     fn ranges(
         &self,
-        // TODO(fys): Clarify the behavior when it is None.
         projection: Option<&[ColumnId]>,
         options: RangesOptions,
     ) -> Result<MemtableRanges>;
