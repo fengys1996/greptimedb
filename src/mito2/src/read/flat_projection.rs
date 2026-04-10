@@ -88,6 +88,7 @@ impl FlatProjectionMapper {
     pub fn new_with_read_columns(
         metadata: &RegionMetadataRef,
         projection_input: ProjectionInput,
+        // TODO(fys): make read_column_ids to ReadColumns
         read_column_ids: Vec<ColumnId>,
     ) -> Result<Self> {
         let projection = projection_input.projection;

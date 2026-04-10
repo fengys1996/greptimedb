@@ -426,11 +426,9 @@ impl ScanRegion {
             // root columns.
             {
                 let metadata = &self.version.metadata;
-                let read_columns_from_projection =
-                    read_columns_from_projection(projection, metadata);
-                let read_columns_from_predicate = read_columns_from_predicate(&predicate, metadata);
-                let _final_read_columns =
-                    merge_read_cols(read_columns_from_projection, read_columns_from_predicate);
+                let from_projection = read_columns_from_projection(projection, metadata);
+                let from_predicate = read_columns_from_predicate(&predicate, metadata);
+                let _final_read_columns = merge_read_cols(from_projection, from_predicate);
                 self.build_read_column_ids(p, &predicate)?
             }
             None => self
