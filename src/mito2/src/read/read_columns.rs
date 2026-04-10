@@ -12,9 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use datafusion_common::HashMap;
+use datafusion_expr::utils::expr_to_columns;
 use snafu::OptionExt;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, NestedPath, ProjectionInput};
@@ -278,12 +279,38 @@ pub fn read_columns_from_projection(
     Ok(ReadColumns { cols })
 }
 
-/// Build [`ReadColumns`] from [`ProjectionInput`].
+/// Build [`ReadColumns`] from [`PredicateGroup`].
 pub fn read_columns_from_predicate(
-    _predicate: &PredicateGroup,
-    _metadata: &RegionMetadataRef,
+    predicate: &PredicateGroup,
+    metadata: &RegionMetadataRef,
 ) -> ReadColumns {
-    todo!()
+    let mut root_names = HashSet::new();
+    let mut columns = HashSet::new();
+
+    if let Some(p) = predicate.predicate_without_region() {
+        for expr in p.exprs() {
+            columns.clear();
+            if expr_to_columns(expr, &mut columns).is_err() {
+                continue;
+            }
+            root_names.extend(columns.iter().map(|column| column.name.clone()));
+        }
+    }
+
+    if let Some(expr) = predicate.region_partition_expr() {
+        expr.collect_column_names(&mut root_names);
+    }
+
+    // TODO(fys): Parse nested paths from predicate expressions and attach them
+    // to read columns instead of always reading the whole root column.
+    let cols = metadata
+        .column_metadatas
+        .iter()
+        .filter(|column| root_names.contains(column.column_schema.name.as_str()))
+        .map(|column| ReadColumn::new(column.column_id, vec![]))
+        .collect();
+
+    ReadColumns { cols }
 }
 
 #[cfg(test)]
@@ -291,6 +318,7 @@ mod tests {
     use std::sync::Arc;
 
     use api::v1::SemanticType;
+    use datafusion_expr::{col, lit};
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
@@ -358,6 +386,33 @@ mod tests {
             err.to_string()
                 .contains("projection index 3 is out of bound")
         );
+    }
+
+    #[test]
+    fn test_read_columns_from_predicate_reads_root_columns_only() {
+        let metadata = new_test_metadata();
+        let predicate = PredicateGroup::new(
+            metadata.as_ref(),
+            &[col("field_0").gt(lit(1)), col("tag_0").eq(lit("a"))],
+        )
+        .unwrap();
+
+        let read_columns = read_columns_from_predicate(&predicate, &metadata);
+
+        let expected = ReadColumns {
+            cols: vec![ReadColumn::new(0, vec![]), ReadColumn::new(3, vec![])],
+        };
+        assert_eq!(expected, read_columns);
+    }
+
+    #[test]
+    fn test_read_columns_from_predicate_empty() {
+        let metadata = new_test_metadata();
+        let predicate = PredicateGroup::new(metadata.as_ref(), &[]).unwrap();
+
+        let read_columns = read_columns_from_predicate(&predicate, &metadata);
+
+        assert!(read_columns.is_empty());
     }
 
     #[test]
