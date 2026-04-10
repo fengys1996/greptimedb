@@ -408,8 +408,8 @@ impl ScanRegion {
 
         let (output_cols, read_cols) = match &self.request.projection_input {
             Some(p) =>
-            // FIXME(fys): `build_read_column_ids()` only adds filter-required root
-            // columns, but nested pruning later is driven by
+            // FIXME(fys): predicate expansion currently only adds filter-required
+            // root columns, but nested pruning later is driven by
             // `projection_input.nested_paths` when we build `ReadColumns`.
             //
             // This can under-read nested data if the projection and predicate
@@ -600,73 +600,6 @@ impl ScanRegion {
             .expect("Time index must have timestamp-compatible type")
             .unit();
         build_time_range_predicate(&time_index.column_schema.name, unit, &self.request.filters)
-    }
-
-    /// Return all columns id to read according to the projection and filters.
-    #[allow(dead_code)]
-    fn build_read_column_ids(
-        &self,
-        projection: &[usize],
-        predicate: &PredicateGroup,
-    ) -> Result<Vec<ColumnId>> {
-        let metadata = &self.version.metadata;
-        // use Vec for read_column_ids to keep the order of columns.
-        let mut read_column_ids = Vec::new();
-        let mut seen = HashSet::new();
-
-        for idx in projection {
-            let column =
-                metadata
-                    .column_metadatas
-                    .get(*idx)
-                    .with_context(|| InvalidRequestSnafu {
-                        region_id: metadata.region_id,
-                        reason: format!("projection index {} is out of bound", idx),
-                    })?;
-            seen.insert(column.column_id);
-            // keep the projection order
-            read_column_ids.push(column.column_id);
-        }
-
-        if projection.is_empty() {
-            let time_index = metadata.time_index_column().column_id;
-            if seen.insert(time_index) {
-                read_column_ids.push(time_index);
-            }
-        }
-
-        let mut extra_names = HashSet::new();
-        let mut columns = HashSet::new();
-
-        for expr in &self.request.filters {
-            columns.clear();
-            if expr_to_columns(expr, &mut columns).is_err() {
-                continue;
-            }
-            extra_names.extend(columns.iter().map(|column| column.name.clone()));
-        }
-
-        if let Some(expr) = predicate.region_partition_expr() {
-            expr.collect_column_names(&mut extra_names);
-        }
-
-        if !extra_names.is_empty() {
-            for column in &metadata.column_metadatas {
-                if extra_names.contains(column.column_schema.name.as_str())
-                    && !seen.contains(&column.column_id)
-                {
-                    read_column_ids.push(column.column_id);
-                }
-                extra_names.remove(column.column_schema.name.as_str());
-            }
-            if !extra_names.is_empty() {
-                warn!(
-                    "Some columns in filters are not found in region {}: {:?}",
-                    metadata.region_id, extra_names
-                );
-            }
-        }
-        Ok(read_column_ids)
     }
 
     /// Partitions filters into two groups: non-field filters and field filters.
@@ -1916,86 +1849,6 @@ mod tests {
                     .build(),
             )))
             .with_files(vec![file])
-    }
-
-    #[tokio::test]
-    async fn test_build_read_column_ids_includes_filters() {
-        let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
-        let version = new_version(metadata.clone());
-        let env = SchedulerEnv::new().await;
-        let request = ScanRequest {
-            projection_input: Some(ProjectionInput::new().with_projection(vec![4])),
-            filters: vec![
-                col("v0").gt(lit(1)),
-                col("ts").gt(lit(0)),
-                col("k0").eq(lit("foo")),
-            ],
-            ..Default::default()
-        };
-        let scan_region = ScanRegion::new(
-            version,
-            env.access_layer.clone(),
-            request,
-            CacheStrategy::Disabled,
-        );
-        let predicate =
-            PredicateGroup::new(metadata.as_ref(), &scan_region.request.filters).unwrap();
-        let projection = &scan_region.request.projection_indices().unwrap();
-        let read_ids = scan_region
-            .build_read_column_ids(projection, &predicate)
-            .unwrap();
-        assert_eq!(vec![4, 0, 2, 3], read_ids);
-    }
-
-    #[tokio::test]
-    async fn test_build_read_column_ids_empty_projection() {
-        let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
-        let version = new_version(metadata.clone());
-        let env = SchedulerEnv::new().await;
-        let request = ScanRequest {
-            projection_input: Some(ProjectionInput::new().with_projection(vec![])),
-            ..Default::default()
-        };
-        let scan_region = ScanRegion::new(
-            version,
-            env.access_layer.clone(),
-            request,
-            CacheStrategy::Disabled,
-        );
-        let predicate =
-            PredicateGroup::new(metadata.as_ref(), &scan_region.request.filters).unwrap();
-        let projection = &scan_region.request.projection_indices().unwrap();
-        let read_ids = scan_region
-            .build_read_column_ids(projection, &predicate)
-            .unwrap();
-        // Empty projection should still read the time index column (id 2 in this test schema).
-        assert_eq!(vec![2], read_ids);
-    }
-
-    #[tokio::test]
-    async fn test_build_read_column_ids_keeps_projection_order() {
-        let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
-        let version = new_version(metadata.clone());
-        let env = SchedulerEnv::new().await;
-        let request = ScanRequest {
-            projection_input: Some(ProjectionInput::new().with_projection(vec![4, 1])),
-            filters: vec![col("v0").gt(lit(1))],
-            ..Default::default()
-        };
-        let scan_region = ScanRegion::new(
-            version,
-            env.access_layer.clone(),
-            request,
-            CacheStrategy::Disabled,
-        );
-        let predicate =
-            PredicateGroup::new(metadata.as_ref(), &scan_region.request.filters).unwrap();
-        let projection = &scan_region.request.projection_indices().unwrap();
-        let read_ids = scan_region
-            .build_read_column_ids(projection, &predicate)
-            .unwrap();
-        // Projection order preserved, extra columns appended in schema order.
-        assert_eq!(vec![4, 1, 3], read_ids);
     }
 
     /// Helper to create a timestamp millisecond literal.
