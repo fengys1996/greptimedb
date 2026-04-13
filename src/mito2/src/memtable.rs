@@ -42,6 +42,7 @@ use crate::metrics::WRITE_BUFFER_BYTES;
 use crate::read::Batch;
 use crate::read::batch_adapter::BatchToRecordBatchAdapter;
 use crate::read::prune::PruneTimeIterator;
+use crate::read::read_columns::ReadColumns;
 use crate::read::scan_region::PredicateGroup;
 use crate::region::options::{MemtableOptions, MergeMode, RegionOptions};
 use crate::sst::FormatType;
@@ -90,6 +91,8 @@ pub struct RangesOptions {
     pub predicate: PredicateGroup,
     /// Sequence range to filter the data.
     pub sequence: Option<SequenceRange>,
+    /// Logical read columns with optional nested paths.
+    pub read_cols: Option<ReadColumns>,
 }
 
 impl Default for RangesOptions {
@@ -99,6 +102,7 @@ impl Default for RangesOptions {
             pre_filter_mode: PreFilterMode::All,
             predicate: PredicateGroup::default(),
             sequence: None,
+            read_cols: None,
         }
     }
 }
@@ -111,6 +115,7 @@ impl RangesOptions {
             pre_filter_mode: PreFilterMode::All,
             predicate: PredicateGroup::default(),
             sequence: None,
+            read_cols: None,
         }
     }
 
@@ -132,6 +137,13 @@ impl RangesOptions {
     #[must_use]
     pub fn with_sequence(mut self, sequence: Option<SequenceRange>) -> Self {
         self.sequence = sequence;
+        self
+    }
+
+    /// Sets the logical read columns.
+    #[must_use]
+    pub fn with_read_cols(mut self, read_cols: ReadColumns) -> Self {
+        self.read_cols = Some(read_cols);
         self
     }
 }
@@ -590,13 +602,23 @@ pub struct BatchToRecordBatchContext {
     metadata: RegionMetadataRef,
     codec: Arc<dyn PrimaryKeyCodec>,
     read_column_ids: Vec<ColumnId>,
+    read_cols: ReadColumns,
 }
 
 impl BatchToRecordBatchContext {
     /// Creates a new context for adapting batch iterators.
-    pub fn new(metadata: RegionMetadataRef, mut read_column_ids: Vec<ColumnId>) -> Self {
+    pub fn new(metadata: RegionMetadataRef, read_column_ids: Vec<ColumnId>) -> Self {
+        let read_cols = ReadColumns::from_column_ids(read_column_ids.iter().copied());
+        Self::new_with_read_columns(metadata, read_cols)
+    }
+
+    /// Creates a new context for adapting batch iterators with logical read columns.
+    pub fn new_with_read_columns(metadata: RegionMetadataRef, mut read_cols: ReadColumns) -> Self {
+        let mut read_column_ids = read_cols.column_ids();
         if read_column_ids.is_empty() {
-            read_column_ids.push(metadata.time_index_column().column_id);
+            let time_index_id = metadata.time_index_column().column_id;
+            read_column_ids.push(time_index_id);
+            read_cols = ReadColumns::from_column_ids([time_index_id]);
         }
 
         let codec = build_primary_key_codec(&metadata);
@@ -604,6 +626,7 @@ impl BatchToRecordBatchContext {
             metadata,
             codec,
             read_column_ids,
+            read_cols,
         }
     }
 
@@ -613,6 +636,7 @@ impl BatchToRecordBatchContext {
             self.metadata.clone(),
             self.codec.clone(),
             &self.read_column_ids,
+            &self.read_cols,
         ))
     }
 }

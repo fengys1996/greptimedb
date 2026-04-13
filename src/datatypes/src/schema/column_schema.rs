@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::{fmt, mem};
 
 use arrow::datatypes::Field;
@@ -26,10 +27,13 @@ use sqlparser_derive::{Visit, VisitMut};
 
 use crate::data_type::{ConcreteDataType, DataType};
 use crate::error::{
-    self, ArrowMetadataSnafu, Error, InvalidFulltextOptionSnafu, ParseExtendedTypeSnafu, Result,
+    self, ArrowMetadataSnafu, CastTypeSnafu, Error, InvalidFulltextOptionSnafu,
+    ParseExtendedTypeSnafu, Result,
 };
 use crate::schema::TYPE_KEY;
 use crate::schema::constraint::ColumnDefaultConstraint;
+use crate::types::json_type::JsonNativeType;
+use crate::types::{JsonFormat, JsonType, StructType};
 use crate::value::Value;
 use crate::vectors::VectorRef;
 
@@ -189,6 +193,21 @@ impl ColumnSchema {
                 .map(column_default_constraint_size)
                 .unwrap_or_default()
             + metadata_size(&self.metadata)
+    }
+
+    /// Returns a new column schema pruned by the provided nested paths.
+    ///
+    /// Each nested path is relative to the current column and does not contain
+    /// the root column name. An empty path means keeping the whole column.
+    pub fn prune_by_nested_paths(&self, nested_paths: &[Vec<String>]) -> Result<Self> {
+        if nested_paths.is_empty() || nested_paths.iter().any(|path| path.is_empty()) {
+            return Ok(self.clone());
+        }
+
+        let data_type = prune_data_type_by_nested_paths(&self.name, &self.data_type, nested_paths)?;
+        let mut schema = self.clone();
+        schema.data_type = data_type;
+        Ok(schema)
     }
 
     /// Set the inverted index for the column.
@@ -503,6 +522,130 @@ impl ColumnSchema {
 
     pub fn is_indexed(&self) -> bool {
         self.is_inverted_indexed() || self.is_fulltext_indexed() || self.is_skipping_indexed()
+    }
+}
+
+fn prune_data_type_by_nested_paths(
+    column_name: &str,
+    data_type: &ConcreteDataType,
+    nested_paths: &[Vec<String>],
+) -> Result<ConcreteDataType> {
+    if nested_paths.is_empty() || nested_paths.iter().any(|path| path.is_empty()) {
+        return Ok(data_type.clone());
+    }
+
+    match data_type {
+        ConcreteDataType::Struct(struct_type) => {
+            let mut paths_by_field = HashMap::<&str, Vec<Vec<String>>>::new();
+            for path in nested_paths {
+                let Some((field_name, rest)) = path.split_first() else {
+                    continue;
+                };
+                paths_by_field
+                    .entry(field_name.as_str())
+                    .or_default()
+                    .push(rest.to_vec());
+            }
+
+            let fields = struct_type.fields();
+            let mut pruned_fields = Vec::new();
+            for field in fields.iter() {
+                let Some(field_paths) = paths_by_field.remove(field.name()) else {
+                    continue;
+                };
+                let data_type =
+                    prune_data_type_by_nested_paths(column_name, field.data_type(), &field_paths)?;
+                pruned_fields.push(field.clone().with_data_type(data_type));
+            }
+
+            if !paths_by_field.is_empty() {
+                let mut unknown_fields = paths_by_field.into_keys().collect::<Vec<_>>();
+                unknown_fields.sort_unstable();
+                return CastTypeSnafu {
+                    msg: format!(
+                        "Failed to prune nested paths for column '{column_name}', unknown struct field(s): {}",
+                        unknown_fields.join(", ")
+                    ),
+                }
+                .fail();
+            }
+
+            Ok(ConcreteDataType::Struct(StructType::new(Arc::new(
+                pruned_fields,
+            ))))
+        }
+        ConcreteDataType::Json(json_type) => {
+            let native_type = prune_json_native_type_by_nested_paths(
+                column_name,
+                json_type.native_type(),
+                nested_paths,
+            )?;
+            Ok(ConcreteDataType::Json(JsonType::new(JsonFormat::Native(
+                Box::new(native_type),
+            ))))
+        }
+        other => CastTypeSnafu {
+            msg: format!(
+                "Failed to prune nested paths for column '{column_name}', cannot descend into type {other}",
+            ),
+        }
+        .fail(),
+    }
+}
+
+fn prune_json_native_type_by_nested_paths(
+    column_name: &str,
+    json_type: &JsonNativeType,
+    nested_paths: &[Vec<String>],
+) -> Result<JsonNativeType> {
+    if nested_paths.is_empty() || nested_paths.iter().any(|path| path.is_empty()) {
+        return Ok(json_type.clone());
+    }
+
+    match json_type {
+        JsonNativeType::Object(object) => {
+            let mut paths_by_field = HashMap::<&str, Vec<Vec<String>>>::new();
+            for path in nested_paths {
+                let Some((field_name, rest)) = path.split_first() else {
+                    continue;
+                };
+                paths_by_field
+                    .entry(field_name.as_str())
+                    .or_default()
+                    .push(rest.to_vec());
+            }
+
+            let mut pruned = object.clone();
+            pruned.clear();
+            for (field_name, field_type) in object {
+                let Some(field_paths) = paths_by_field.remove(field_name.as_str()) else {
+                    continue;
+                };
+                let pruned_type =
+                    prune_json_native_type_by_nested_paths(column_name, field_type, &field_paths)?;
+                pruned.insert(field_name.clone(), pruned_type);
+            }
+
+            if !paths_by_field.is_empty() {
+                let mut unknown_fields = paths_by_field.into_keys().collect::<Vec<_>>();
+                unknown_fields.sort_unstable();
+                return CastTypeSnafu {
+                    msg: format!(
+                        "Failed to prune nested paths for column '{column_name}', unknown json field(s): {}",
+                        unknown_fields.join(", ")
+                    ),
+                }
+                .fail();
+            }
+
+            Ok(JsonNativeType::Object(pruned))
+        }
+        other => CastTypeSnafu {
+            msg: format!(
+                "Failed to prune nested paths for column '{column_name}', cannot descend into type Json<{other}>",
+            ),
+        }
+        .fail(),
     }
 }
 
@@ -1230,8 +1373,41 @@ mod tests {
     use arrow::datatypes::{DataType as ArrowDataType, TimeUnit};
 
     use super::*;
+    use crate::types::StructField;
     use crate::value::Value;
     use crate::vectors::Int32Vector;
+
+    fn nested_column_schema() -> ColumnSchema {
+        ColumnSchema::new(
+            "j",
+            ConcreteDataType::Struct(StructType::new(Arc::new(vec![
+                StructField::new(
+                    "a",
+                    ConcreteDataType::Struct(StructType::new(Arc::new(vec![
+                        StructField::new("b", ConcreteDataType::int64_datatype(), true),
+                        StructField::new("c", ConcreteDataType::string_datatype(), true),
+                    ]))),
+                    true,
+                ),
+                StructField::new("d", ConcreteDataType::float64_datatype(), true),
+            ]))),
+            true,
+        )
+    }
+
+    fn nested_json_column_schema() -> ColumnSchema {
+        ColumnSchema::new(
+            "data",
+            ConcreteDataType::Json(JsonType::new(JsonFormat::Native(Box::new(
+                JsonNativeType::Object(std::collections::BTreeMap::from([
+                    ("year".to_string(), JsonNativeType::i64()),
+                    ("month".to_string(), JsonNativeType::i64()),
+                    ("day".to_string(), JsonNativeType::i64()),
+                ])),
+            )))),
+            true,
+        )
+    }
 
     #[test]
     fn test_column_schema() {
@@ -1549,5 +1725,96 @@ mod tests {
             options_str,
             "{\"enable\":true,\"analyzer\":\"English\",\"case-sensitive\":false,\"backend\":\"bloom\",\"granularity\":10240,\"false-positive-rate-in-10000\":100}"
         );
+    }
+
+    #[test]
+    fn test_prune_by_nested_paths_on_struct() {
+        let column_schema = nested_column_schema();
+
+        let pruned = column_schema
+            .prune_by_nested_paths(&[
+                vec!["a".to_string(), "b".to_string()],
+                vec!["d".to_string()],
+            ])
+            .unwrap();
+
+        let ConcreteDataType::Struct(root) = &pruned.data_type else {
+            panic!("expected struct type");
+        };
+        let fields = root.fields();
+        assert_eq!(2, fields.len());
+        assert_eq!("a", fields[0].name());
+        assert_eq!("d", fields[1].name());
+
+        let ConcreteDataType::Struct(a_type) = fields[0].data_type() else {
+            panic!("expected nested struct type");
+        };
+        let a_fields = a_type.fields();
+        assert_eq!(1, a_fields.len());
+        assert_eq!("b", a_fields[0].name());
+    }
+
+    #[test]
+    fn test_prune_by_nested_paths_keeps_whole_field_if_requested() {
+        let column_schema = nested_column_schema();
+
+        let pruned = column_schema
+            .prune_by_nested_paths(&[
+                vec!["a".to_string()],
+                vec!["a".to_string(), "b".to_string()],
+            ])
+            .unwrap();
+
+        let ConcreteDataType::Struct(root) = &pruned.data_type else {
+            panic!("expected struct type");
+        };
+        let fields = root.fields();
+        assert_eq!(1, fields.len());
+
+        let ConcreteDataType::Struct(a_type) = fields[0].data_type() else {
+            panic!("expected nested struct type");
+        };
+        assert_eq!(2, a_type.fields().len());
+    }
+
+    #[test]
+    fn test_prune_by_nested_paths_rejects_unknown_field() {
+        let column_schema = nested_column_schema();
+
+        let err = column_schema
+            .prune_by_nested_paths(&[vec!["x".to_string()]])
+            .unwrap_err();
+
+        assert!(err.to_string().contains("unknown struct field"));
+    }
+
+    #[test]
+    fn test_prune_by_nested_paths_rejects_descending_into_scalar() {
+        let column_schema = nested_column_schema();
+
+        let err = column_schema
+            .prune_by_nested_paths(&[vec!["d".to_string(), "x".to_string()]])
+            .unwrap_err();
+
+        assert!(err.to_string().contains("cannot descend into type"));
+    }
+
+    #[test]
+    fn test_prune_by_nested_paths_on_json_native_object() {
+        let column_schema = nested_json_column_schema();
+
+        let pruned = column_schema
+            .prune_by_nested_paths(&[vec!["year".to_string()]])
+            .unwrap();
+
+        let ConcreteDataType::Json(json_type) = &pruned.data_type else {
+            panic!("expected json type");
+        };
+        let JsonNativeType::Object(object) = json_type.native_type() else {
+            panic!("expected native object");
+        };
+
+        assert_eq!(1, object.len());
+        assert!(object.contains_key("year"));
     }
 }

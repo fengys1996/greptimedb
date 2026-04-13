@@ -18,7 +18,9 @@ use std::sync::Arc;
 
 use api::v1::SemanticType;
 use common_error::ext::BoxedError;
-use common_recordbatch::error::{ArrowComputeSnafu, ExternalSnafu, NewDfRecordBatchSnafu};
+use common_recordbatch::error::{
+    ArrowComputeSnafu, ExternalSnafu as RecordBatchExternalSnafu, NewDfRecordBatchSnafu,
+};
 use common_recordbatch::{DfRecordBatch, RecordBatch};
 use datafusion_common::cast_column;
 use datatypes::arrow::array::Array;
@@ -30,10 +32,10 @@ use datatypes::value::Value;
 use datatypes::vectors::Helper;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
-use store_api::storage::{ColumnId, ProjectionInput};
+use store_api::storage::{ColumnId, NestedPath, ProjectionInput};
 
 use crate::cache::CacheStrategy;
-use crate::error::{InvalidRequestSnafu, RecordBatchSnafu, Result};
+use crate::error::{ExternalSnafu, InvalidRequestSnafu, RecordBatchSnafu, Result};
 use crate::read::projection::{read_column_ids_from_projection, repeated_vector_with_cache};
 use crate::read::read_columns::{ReadColumns, read_columns_from_projection};
 use crate::sst::parquet::flat_format::sst_column_id_indices;
@@ -105,9 +107,23 @@ impl FlatProjectionMapper {
                     region_id: metadata.region_id,
                     reason: format!("col id {} is invalid", col_id),
                 })?;
-            // TODO(fys): try use col.nested path to prune the column schema
-            // if it is a nested field.
-            let col_schema = col.column_schema.clone();
+            let col_schema = if read_col.nested_paths().is_empty() {
+                col.column_schema.clone()
+            } else {
+                let relative_paths = strip_root_from_nested_paths(
+                    metadata.region_id,
+                    &col.column_schema.name,
+                    read_col.nested_paths(),
+                )?;
+                col.column_schema.prune_by_nested_paths(&relative_paths)
+                    .map_err(BoxedError::new)
+                    .context(ExternalSnafu {
+                        context: format!(
+                            "failed to prune schema for column '{}'",
+                            col.column_schema.name
+                        ),
+                    })?
+            };
             col_schemas.push(col_schema);
         }
 
@@ -344,11 +360,43 @@ impl FlatProjectionMapper {
             }
             let vector = Helper::try_into_vector(array)
                 .map_err(BoxedError::new)
-                .context(ExternalSnafu)?;
+                .context(RecordBatchExternalSnafu)?;
             columns.push(vector);
         }
         Ok(columns)
     }
+}
+
+fn strip_root_from_nested_paths(
+    region_id: store_api::storage::RegionId,
+    root: &str,
+    nested_paths: &[NestedPath],
+) -> Result<Vec<NestedPath>> {
+    nested_paths
+        .iter()
+        .map(|path| {
+            let Some((root_name, rest)) = path.split_first() else {
+                return InvalidRequestSnafu {
+                    region_id,
+                    reason: "nested path should not be empty".to_string(),
+                }
+                .fail();
+            };
+
+            if root_name != root {
+                return InvalidRequestSnafu {
+                    region_id,
+                    reason: format!(
+                        "nested path root '{}' doesn't match column '{}'",
+                        root_name, root
+                    ),
+                }
+                .fail();
+            }
+
+            Ok(rest.to_vec())
+        })
+        .collect()
 }
 
 fn single_value_string_dictionary<'a>(
@@ -532,7 +580,7 @@ impl DfBatchAssembler {
             let array = batch.column(*index).clone();
             let vector = Helper::try_into_vector(array)
                 .map_err(BoxedError::new)
-                .context(ExternalSnafu)?;
+                .context(RecordBatchExternalSnafu)?;
             columns.push(vector);
         }
         RecordBatch::to_df_record_batch(self.output_arrow_schema_with_internal.clone(), columns)

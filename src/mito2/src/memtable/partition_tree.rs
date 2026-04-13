@@ -185,6 +185,9 @@ impl Memtable for PartitionTreeMemtable {
         let predicate = options.predicate;
         let sequence = options.sequence;
         let read_column_ids = read_column_ids_from_projection(&self.tree.metadata, projection);
+        let read_cols = options
+            .read_cols
+            .unwrap_or_else(|| crate::read::read_columns::ReadColumns::from_column_ids(read_column_ids.iter().copied()));
         let projection = projection.map(|ids| ids.to_vec());
         let builder = Box::new(PartitionTreeIterBuilder {
             tree: self.tree.clone(),
@@ -192,9 +195,9 @@ impl Memtable for PartitionTreeMemtable {
             predicate: predicate.predicate().cloned(),
             sequence,
         });
-        let adapter_context = Arc::new(BatchToRecordBatchContext::new(
+        let adapter_context = Arc::new(BatchToRecordBatchContext::new_with_read_columns(
             self.tree.metadata.clone(),
-            read_column_ids,
+            read_cols,
         ));
         let context = Arc::new(MemtableRangeContext::new_with_batch_to_record_batch(
             self.id,

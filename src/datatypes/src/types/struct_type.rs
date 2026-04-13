@@ -143,6 +143,11 @@ impl StructField {
         &self.data_type
     }
 
+    pub fn with_data_type(mut self, data_type: ConcreteDataType) -> Self {
+        self.data_type = data_type;
+        self
+    }
+
     pub fn is_nullable(&self) -> bool {
         self.nullable
     }
