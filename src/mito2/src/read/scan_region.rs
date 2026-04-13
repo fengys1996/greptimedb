@@ -484,6 +484,7 @@ impl ScanRegion {
                         self.request.memtable_min_sequence,
                         self.request.memtable_max_sequence,
                     ))
+                    .with_read_cols(mapper.read_columns().clone())
                     .with_pre_filter_mode(filter_mode),
             )?;
             mem_range_builders.extend(ranges_in_memtable.ranges.into_values().map(|v| {

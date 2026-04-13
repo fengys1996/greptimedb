@@ -17,24 +17,29 @@
 //! produce [`Batch`] to feed into the flat read pipeline.
 
 use std::borrow::Cow;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use api::v1::SemanticType;
-use datatypes::arrow::array::{ArrayRef, BinaryArray, DictionaryArray, UInt32Array};
+use datatypes::arrow::array::{Array, ArrayRef, BinaryArray, DictionaryArray, StructArray, UInt32Array};
 use datatypes::arrow::datatypes::{Field, SchemaRef};
 use datatypes::arrow::record_batch::RecordBatch;
+use datatypes::schema::ColumnSchema;
 use datatypes::prelude::{ConcreteDataType, DataType, Vector};
+use datatypes::types::{StructField, StructType};
+use datatypes::types::json_type::JsonNativeType;
 use mito_codec::row_converter::{CompositeValues, PrimaryKeyCodec};
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::ColumnId;
+use store_api::storage::{ColumnId, NestedPath};
 
 use crate::error::{
-    DataTypeMismatchSnafu, DecodeSnafu, EvalPartitionFilterSnafu, NewRecordBatchSnafu, Result,
+    DataTypeMismatchSnafu, DecodeSnafu, EvalPartitionFilterSnafu, InvalidRequestSnafu,
+    NewRecordBatchSnafu, Result,
 };
 use crate::memtable::BoxedBatchIterator;
 use crate::read::Batch;
+use crate::read::read_columns::ReadColumns;
 use crate::sst::{internal_fields, tag_maybe_to_dictionary_field};
 
 /// Adapts a [`BoxedBatchIterator`] into an `Iterator<Item = Result<RecordBatch>>`
@@ -44,12 +49,18 @@ pub struct BatchToRecordBatchAdapter {
     codec: Arc<dyn PrimaryKeyCodec>,
     output_schema: SchemaRef,
     projected_pk: Vec<ProjectedPkColumn>,
+    projected_fields: Vec<ProjectedFieldColumn>,
 }
 
 struct ProjectedPkColumn {
     column_id: ColumnId,
     pk_index: usize,
     data_type: ConcreteDataType,
+    nested_paths: Vec<NestedPath>,
+}
+
+struct ProjectedFieldColumn {
+    nested_paths: Vec<NestedPath>,
 }
 
 impl BatchToRecordBatchAdapter {
@@ -64,8 +75,10 @@ impl BatchToRecordBatchAdapter {
         metadata: RegionMetadataRef,
         codec: Arc<dyn PrimaryKeyCodec>,
         read_column_ids: &[ColumnId],
+        read_cols: &ReadColumns,
     ) -> Self {
         let read_column_id_set: HashSet<_> = read_column_ids.iter().copied().collect();
+        let nested_paths_by_id = nested_paths_by_id(&metadata, read_cols);
         let projected_pk = metadata
             .primary_key_columns()
             .enumerate()
@@ -73,16 +86,35 @@ impl BatchToRecordBatchAdapter {
             .map(|(pk_index, column_metadata)| ProjectedPkColumn {
                 column_id: column_metadata.column_id,
                 pk_index,
-                data_type: column_metadata.column_schema.data_type.clone(),
+                data_type: pruned_column_schema(column_metadata, &nested_paths_by_id)
+                    .expect("failed to prune memtable primary-key schema")
+                    .data_type,
+                nested_paths: nested_paths_by_id
+                    .get(&column_metadata.column_id)
+                    .cloned()
+                    .unwrap_or_default(),
             })
             .collect();
-        let output_schema = compute_output_arrow_schema(&metadata, &read_column_id_set);
+        let projected_fields = metadata
+            .field_columns()
+            .filter(|column_metadata| read_column_id_set.contains(&column_metadata.column_id))
+            .map(|column_metadata| ProjectedFieldColumn {
+                nested_paths: nested_paths_by_id
+                    .get(&column_metadata.column_id)
+                    .cloned()
+                    .unwrap_or_default(),
+            })
+            .collect();
+        let output_schema =
+            compute_output_arrow_schema(&metadata, &read_column_id_set, &nested_paths_by_id)
+                .expect("failed to compute pruned memtable output schema");
 
         Self {
             iter,
             codec,
             output_schema,
             projected_pk,
+            projected_fields,
         }
     }
 
@@ -111,12 +143,34 @@ impl BatchToRecordBatchAdapter {
                 ));
             } else {
                 let value = get_pk_value(&pk_values, pk_column.column_id, pk_column.pk_index);
+                if !pk_column.nested_paths.is_empty() {
+                    let err = InvalidRequestSnafu {
+                        region_id: store_api::storage::RegionId::new(0, 0),
+                        reason: format!(
+                            "nested projection on primary-key column {} is not supported in memtable adapter yet",
+                            pk_column.column_id
+                        ),
+                    }
+                    .build();
+                    return Err(err);
+                }
                 let array = build_repeated_value_array(value, &pk_column.data_type, num_rows)?;
                 columns.push(array);
             }
         }
-        for batch_col in batch.fields() {
-            columns.push(batch_col.data.to_arrow_array());
+        for (batch_col, projected_field) in batch.fields().iter().zip(self.projected_fields.iter()) {
+            let array = if projected_field.nested_paths.is_empty() {
+                batch_col.data.to_arrow_array()
+            } else {
+                let (_, relative_paths) =
+                    split_root_from_nested_paths(&projected_field.nested_paths)?;
+                prune_array_by_nested_paths(
+                    batch_col.data.to_arrow_array(),
+                    &batch_col.data.data_type(),
+                    &relative_paths,
+                )?
+            };
+            columns.push(array);
         }
 
         columns.push(batch.timestamps().to_arrow_array());
@@ -205,20 +259,22 @@ fn build_string_tag_dict_array(
 fn compute_output_arrow_schema(
     metadata: &RegionMetadataRef,
     read_column_id_set: &HashSet<ColumnId>,
-) -> SchemaRef {
+    nested_paths_by_id: &HashMap<ColumnId, Vec<NestedPath>>,
+) -> Result<SchemaRef> {
     let mut fields = Vec::new();
 
     for column_metadata in metadata.primary_key_columns() {
         if !read_column_id_set.contains(&column_metadata.column_id) {
             continue;
         }
+        let column_schema = pruned_column_schema(column_metadata, nested_paths_by_id)?;
         let field = Arc::new(Field::new(
-            &column_metadata.column_schema.name,
-            column_metadata.column_schema.data_type.as_arrow_type(),
-            column_metadata.column_schema.is_nullable(),
+            &column_schema.name,
+            column_schema.data_type.as_arrow_type(),
+            column_schema.is_nullable(),
         ));
         let field = if column_metadata.semantic_type == SemanticType::Tag {
-            tag_maybe_to_dictionary_field(&column_metadata.column_schema.data_type, &field)
+            tag_maybe_to_dictionary_field(&column_schema.data_type, &field)
         } else {
             field
         };
@@ -229,10 +285,11 @@ fn compute_output_arrow_schema(
         if !read_column_id_set.contains(&column_metadata.column_id) {
             continue;
         }
+        let column_schema = pruned_column_schema(column_metadata, nested_paths_by_id)?;
         let field = Arc::new(Field::new(
-            &column_metadata.column_schema.name,
-            column_metadata.column_schema.data_type.as_arrow_type(),
-            column_metadata.column_schema.is_nullable(),
+            &column_schema.name,
+            column_schema.data_type.as_arrow_type(),
+            column_schema.is_nullable(),
         ));
         fields.push(field);
     }
@@ -246,7 +303,162 @@ fn compute_output_arrow_schema(
     fields.push(time_index_field);
     fields.extend(internal_fields().iter().cloned());
 
-    Arc::new(datatypes::arrow::datatypes::Schema::new(fields))
+    Ok(Arc::new(datatypes::arrow::datatypes::Schema::new(fields)))
+}
+
+fn nested_paths_by_id(
+    metadata: &RegionMetadataRef,
+    read_cols: &ReadColumns,
+) -> HashMap<ColumnId, Vec<NestedPath>> {
+    read_cols
+        .columns()
+        .iter()
+        .filter_map(|read_col| {
+            let nested_paths = read_col.nested_paths();
+            if nested_paths.is_empty() {
+                return None;
+            }
+            metadata
+                .column_by_id(read_col.column_id())
+                .map(|column| (column.column_id, nested_paths.to_vec()))
+        })
+        .collect()
+}
+
+fn pruned_column_schema(
+    column_metadata: &store_api::metadata::ColumnMetadata,
+    nested_paths_by_id: &HashMap<ColumnId, Vec<NestedPath>>,
+) -> Result<ColumnSchema> {
+    let Some(nested_paths) = nested_paths_by_id.get(&column_metadata.column_id) else {
+        return Ok(column_metadata.column_schema.clone());
+    };
+    let (_, relative_paths) = split_root_from_nested_paths(nested_paths)?;
+    column_metadata
+        .column_schema
+        .prune_by_nested_paths(&relative_paths)
+        .context(DataTypeMismatchSnafu)
+}
+
+fn split_root_from_nested_paths(nested_paths: &[NestedPath]) -> Result<(String, Vec<NestedPath>)> {
+    let mut root_name = None::<String>;
+    let mut relative_paths = Vec::with_capacity(nested_paths.len());
+
+    for path in nested_paths {
+        let Some((root, rest)) = path.split_first() else {
+            return InvalidRequestSnafu {
+                region_id: store_api::storage::RegionId::new(0, 0),
+                reason: "nested path should not be empty".to_string(),
+            }
+            .fail();
+        };
+        match &root_name {
+            Some(existing) if existing != root => {
+                return InvalidRequestSnafu {
+                    region_id: store_api::storage::RegionId::new(0, 0),
+                    reason: format!(
+                        "nested path roots are inconsistent: expected {}, got {}",
+                        existing, root
+                    ),
+                }
+                .fail();
+            }
+            None => root_name = Some(root.clone()),
+            _ => {}
+        }
+        relative_paths.push(rest.to_vec());
+    }
+
+    Ok((root_name.unwrap_or_default(), relative_paths))
+}
+
+fn prune_array_by_nested_paths(
+    array: ArrayRef,
+    data_type: &ConcreteDataType,
+    nested_paths: &[NestedPath],
+) -> Result<ArrayRef> {
+    if nested_paths.is_empty() || nested_paths.iter().any(|path| path.is_empty()) {
+        return Ok(array);
+    }
+
+    match data_type {
+        ConcreteDataType::Struct(struct_type) => prune_struct_array(array, struct_type, nested_paths),
+        ConcreteDataType::Json(json_type) => match json_type.native_type() {
+            JsonNativeType::Object(object) => {
+                let struct_type = StructType::new(Arc::new(
+                    object
+                        .iter()
+                        .map(|(name, field_type)| {
+                            StructField::new(name.clone(), field_type.into(), true)
+                        })
+                        .collect(),
+                ));
+                prune_struct_array(array, &struct_type, nested_paths)
+            }
+            _ => {
+                let err = ColumnSchema::new("json", ConcreteDataType::Json(json_type.clone()), true)
+                    .prune_by_nested_paths(nested_paths)
+                    .unwrap_err();
+                Err(err).context(DataTypeMismatchSnafu)
+            }
+        },
+        _ => {
+            let err = ColumnSchema::new("value", data_type.clone(), true)
+                .prune_by_nested_paths(nested_paths)
+                .unwrap_err();
+            Err(err).context(DataTypeMismatchSnafu)
+        }
+    }
+}
+
+fn prune_struct_array(
+    array: ArrayRef,
+    struct_type: &StructType,
+    nested_paths: &[NestedPath],
+) -> Result<ArrayRef> {
+    let struct_array = array
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .with_context(|| InvalidRequestSnafu {
+            region_id: store_api::storage::RegionId::new(0, 0),
+            reason: format!("expected StructArray, actual {:?}", array.data_type()),
+        })?;
+
+    let mut paths_by_field = HashMap::<&str, Vec<NestedPath>>::new();
+    for path in nested_paths {
+        let Some((field, rest)) = path.split_first() else {
+            continue;
+        };
+        paths_by_field
+            .entry(field.as_str())
+            .or_default()
+            .push(rest.to_vec());
+    }
+
+    let mut fields = Vec::new();
+    let mut arrays = Vec::new();
+    for (idx, field) in struct_type.fields().iter().enumerate() {
+        let Some(field_paths) = paths_by_field.get(field.name()) else {
+            continue;
+        };
+        let child_array =
+            prune_array_by_nested_paths(struct_array.column(idx).clone(), field.data_type(), field_paths)?;
+        let pruned_field_type = ColumnSchema::new(
+            field.name().to_string(),
+            field.data_type().clone(),
+            field.is_nullable(),
+        )
+        .prune_by_nested_paths(field_paths)
+        .context(DataTypeMismatchSnafu)?
+        .data_type;
+        fields.push(field.clone().with_data_type(pruned_field_type).to_df_field());
+        arrays.push(child_array);
+    }
+
+    Ok(Arc::new(StructArray::new(
+        fields.into(),
+        arrays,
+        struct_array.nulls().cloned(),
+    )))
 }
 
 #[cfg(test)]
@@ -279,12 +491,14 @@ mod tests {
             .iter()
             .map(|column| column.column_id)
             .collect::<Vec<_>>();
+        let read_cols = ReadColumns::from_column_ids(read_column_ids.iter().copied());
         let iter: BoxedBatchIterator = Box::new(batches.into_iter().map(Ok));
         BatchToRecordBatchAdapter::new(
             iter,
             Arc::clone(metadata),
             Arc::clone(codec),
             &read_column_ids,
+            &read_cols,
         )
     }
 
@@ -677,8 +891,14 @@ mod tests {
         .unwrap();
 
         let iter: BoxedBatchIterator = Box::new(vec![Ok(batch)].into_iter());
-        let adapter =
-            BatchToRecordBatchAdapter::new(iter, metadata.clone(), codec, &read_column_ids);
+        let read_cols = ReadColumns::from_column_ids(read_column_ids.iter().copied());
+        let adapter = BatchToRecordBatchAdapter::new(
+            iter,
+            metadata.clone(),
+            codec,
+            &read_column_ids,
+            &read_cols,
+        );
         let rb = adapter.into_iter().next().unwrap().unwrap();
 
         let mapper = FlatProjectionMapper::new(&metadata, [0, 3].into_iter()).unwrap();

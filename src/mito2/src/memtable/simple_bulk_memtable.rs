@@ -222,6 +222,9 @@ impl Memtable for SimpleBulkMemtable {
         let sequence = options.sequence;
         let start_time = Instant::now();
         let read_column_ids = read_column_ids_from_projection(&self.region_metadata, projection);
+        let read_cols = options
+            .read_cols
+            .unwrap_or_else(|| crate::read::read_columns::ReadColumns::from_column_ids(read_column_ids.iter().copied()));
         let projection = Arc::new(self.build_projection(projection));
 
         // Use the memtable's overall time range and max sequence for all ranges
@@ -241,9 +244,9 @@ impl Memtable for SimpleBulkMemtable {
         };
 
         let values = self.series.read().unwrap().read_to_values();
-        let batch_to_record_batch = Arc::new(BatchToRecordBatchContext::new(
+        let batch_to_record_batch = Arc::new(BatchToRecordBatchContext::new_with_read_columns(
             self.region_metadata.clone(),
-            read_column_ids.clone(),
+            read_cols,
         ));
 
         let contexts = values

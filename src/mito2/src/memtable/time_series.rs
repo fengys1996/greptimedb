@@ -278,6 +278,9 @@ impl Memtable for TimeSeriesMemtable {
         let predicate = options.predicate;
         let sequence = options.sequence;
         let read_column_ids = read_column_ids_from_projection(&self.region_metadata, projection);
+        let read_cols = options
+            .read_cols
+            .unwrap_or_else(|| crate::read::read_columns::ReadColumns::from_column_ids(read_column_ids.iter().copied()));
         let projection = if let Some(projection) = projection {
             projection.iter().copied().collect()
         } else {
@@ -286,9 +289,9 @@ impl Memtable for TimeSeriesMemtable {
                 .map(|c| c.column_id)
                 .collect()
         };
-        let batch_to_record_batch = Arc::new(BatchToRecordBatchContext::new(
+        let batch_to_record_batch = Arc::new(BatchToRecordBatchContext::new_with_read_columns(
             self.region_metadata.clone(),
-            read_column_ids,
+            read_cols,
         ));
         let builder = Box::new(TimeSeriesIterBuilder {
             series_set: self.series_set.clone(),
