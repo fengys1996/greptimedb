@@ -124,51 +124,6 @@ impl From<Vec<ColumnId>> for ReadColumns {
     }
 }
 
-/// Builds the final read columns.
-///
-/// `read_column_ids` determines which root columns to read and in what order.
-/// Nested paths are attached to matching columns by column name.
-pub fn build_read_columns(
-    metadata: &RegionMetadataRef,
-    nested_paths: &[NestedPath],
-    read_col_ids: &[ColumnId],
-) -> Result<ReadColumns> {
-    let mut paths_by_col: HashMap<String, Vec<NestedPath>> = HashMap::new();
-    for path in nested_paths {
-        let Some((root_name, _)) = path.split_first() else {
-            continue;
-        };
-        paths_by_col
-            .entry(root_name.clone())
-            .or_default()
-            .push(path.clone());
-    }
-
-    let mut cols = Vec::with_capacity(read_col_ids.len());
-    for col_id in read_col_ids {
-        let column_id = *col_id;
-
-        let col = metadata
-            .column_by_id(column_id)
-            .with_context(|| InvalidRequestSnafu {
-                region_id: metadata.region_id,
-                reason: format!("read column id {} does not exist in metadata", column_id),
-            })?;
-
-        let nested_paths = paths_by_col
-            .get(&col.column_schema.name)
-            .cloned()
-            .unwrap_or_default();
-
-        cols.push(ReadColumn {
-            column_id,
-            nested_paths,
-        });
-    }
-
-    Ok(ReadColumns { cols })
-}
-
 pub fn merge_read_cols(a: ReadColumns, b: ReadColumns) -> ReadColumns {
     let mut merged = BTreeMap::<u32, Vec<NestedPath>>::new();
 

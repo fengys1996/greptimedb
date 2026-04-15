@@ -35,7 +35,7 @@ use crate::cache::CacheStrategy;
 use crate::error::{InvalidRequestSnafu, Result};
 use crate::read::Batch;
 use crate::read::flat_projection::FlatProjectionMapper;
-use crate::read::read_columns::{ReadColumns, build_read_columns};
+use crate::read::read_columns::ReadColumns;
 
 /// Only cache vector when its length `<=` this value.
 pub(crate) const MAX_VECTOR_LENGTH_TO_CACHE: usize = 16384;
@@ -196,8 +196,7 @@ impl PrimaryKeyProjectionMapper {
         }
 
         let codec = build_primary_key_codec(metadata);
-        let read_cols =
-            build_read_columns(metadata, &projection_input.nested_paths, &read_column_ids)?;
+        let read_cols = ReadColumns::from_column_ids(read_column_ids.iter().copied());
         // If projection is empty, we don't output any column.
         let output_schema = if is_empty_projection {
             Arc::new(Schema::new(vec![]))
