@@ -1714,7 +1714,7 @@ mod tests {
 
     async fn new_scan_input(metadata: RegionMetadataRef, filters: Vec<Expr>) -> ScanInput {
         let env = SchedulerEnv::new().await;
-        let mapper = ProjectionMapper::new(&metadata, [0, 2, 3].into_iter()).unwrap();
+        let mapper = ProjectionMapper::new(&metadata, [0, 2, 3]).unwrap();
         let predicate = PredicateGroup::new(metadata.as_ref(), &filters).unwrap();
         let file = FileHandle::new(
             crate::sst::file::FileMeta::default(),

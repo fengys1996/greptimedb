@@ -622,7 +622,7 @@ mod tests {
         );
         let cache = CacheStrategy::Disabled;
         // Columns v1, k0
-        let mapper = ProjectionMapper::new(&metadata, [4, 1].into_iter()).unwrap();
+        let mapper = ProjectionMapper::new(&metadata, [4, 1]).unwrap();
         assert_eq!(vec![4, 1], mapper.read_columns().column_ids());
         assert_eq!(
             [
@@ -683,7 +683,7 @@ mod tests {
         );
         let cache = CacheStrategy::Disabled;
         // Empty projection
-        let mapper = ProjectionMapper::new(&metadata, [].into_iter()).unwrap();
+        let mapper = ProjectionMapper::new(&metadata, []).unwrap();
         assert_eq!(vec![0], mapper.read_columns().column_ids()); // Should still read the time index column
         assert!(mapper.output_schema().is_empty());
         let flat_mapper = mapper.as_flat().unwrap();

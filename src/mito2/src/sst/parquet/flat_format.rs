@@ -479,7 +479,7 @@ impl ParquetFlat {
         let sst_column_num =
             flat_sst_arrow_schema_column_num(&metadata, &FlatSchemaOptions::default());
         let format_projection =
-            FormatProjection::compute_format_projection(&id_to_index, sst_column_num, &read_cols);
+            FormatProjection::compute_format_projection(&id_to_index, sst_column_num, read_cols);
 
         Self {
             metadata,

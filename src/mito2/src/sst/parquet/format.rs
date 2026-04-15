@@ -138,7 +138,7 @@ pub enum ReadFormat {
 impl ReadFormat {
     /// Creates a helper to read the primary key format.
     pub fn new_primary_key(metadata: RegionMetadataRef, read_cols: &ReadColumns) -> Self {
-        ReadFormat::PrimaryKey(PrimaryKeyReadFormat::new(metadata, &read_cols))
+        ReadFormat::PrimaryKey(PrimaryKeyReadFormat::new(metadata, read_cols))
     }
 
     /// Creates a helper to read the flat format.
@@ -430,7 +430,7 @@ impl PrimaryKeyReadFormat {
         let format_projection = FormatProjection::compute_format_projection(
             &field_id_to_index,
             arrow_schema.fields.len(),
-            &read_cols,
+            read_cols,
         );
 
         PrimaryKeyReadFormat {

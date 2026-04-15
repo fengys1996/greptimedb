@@ -402,7 +402,7 @@ impl ParquetReaderBuilder {
         // Computes the projection mask.
         let parquet_schema_desc = parquet_meta.file_metadata().schema_descr();
         let parquet_read_cols = read_format.parquet_read_columns();
-        let projection_mask = build_projection_mask(&parquet_read_cols, parquet_schema_desc);
+        let projection_mask = build_projection_mask(parquet_read_cols, parquet_schema_desc);
         let selection = self
             .row_groups_to_read(&read_format, &parquet_meta, &mut metrics.filter_metrics)
             .await;
