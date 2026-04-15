@@ -18,7 +18,9 @@ use std::sync::Arc;
 
 use api::v1::SemanticType;
 use common_error::ext::BoxedError;
-use common_recordbatch::error::{ArrowComputeSnafu, ExternalSnafu, NewDfRecordBatchSnafu};
+use common_recordbatch::error::{
+    ArrowComputeSnafu, CastColumnSnafu, ExternalSnafu, NewDfRecordBatchSnafu,
+};
 use common_recordbatch::{DfRecordBatch, RecordBatch};
 use datafusion_common::cast_column;
 use datatypes::arrow::array::Array;
@@ -289,28 +291,22 @@ impl FlatProjectionMapper {
                         .context(ArrowComputeSnafu)?;
                     array = casted;
                 }
-            }
-            // TODO(fys): remove this after we fix the schema mismatch issue.
-            else {
-                let target_schema = self.output_schema.arrow_schema();
-                if target_schema.field(output_idx).data_type()
-                    != batch.schema().field(*index).data_type()
-                {
-                    common_telemetry::info!(
-                        "Casting column {} from type {} to {} since the batch schema doesn't match the output schema",
-                        self.output_schema.column_schemas()[output_idx].name,
-                        batch.schema().field(*index).data_type(),
-                        target_schema.field(output_idx).data_type()
-                    );
-                    let source_col = batch.column(*index).clone();
+            } else {
+                // ProjectionMapper still builds the output schema based on
+                // root-level projection indices and does not yet prune struct
+                // fields according to nested paths. Meanwhile, the SST read
+                // path already respects nested paths, so the input struct column
+                // here may be narrower than what the output schema expects.
+                // We need to cast it back to the output schema to keep downstream
+                // batch construction type-consistent.
+                let output_schema = self.output_schema.arrow_schema();
+                let target_datatype = output_schema.field(output_idx).data_type();
+                let is_struct = matches!(target_datatype, ArrowDataType::Struct(..));
+                if is_struct && target_datatype != batch.schema().field(*index).data_type() {
+                    let source_col = batch.column(*index);
                     let target_field = self.output_schema.arrow_schema().field(output_idx);
-                    array =
-                        cast_column(&source_col, target_field, &CastOptions::default()).unwrap();
-                } else {
-                    common_telemetry::info!(
-                        "Skip casting column {} since the batch schema matches the output schema",
-                        self.output_schema.column_schemas()[output_idx].name
-                    );
+                    array = cast_column(source_col, target_field, &CastOptions::default())
+                        .context(CastColumnSnafu)?;
                 }
             }
             arrays.push(array);
