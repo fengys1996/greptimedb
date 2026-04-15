@@ -398,35 +398,28 @@ impl ScanRegion {
                 // 1. build read columns from projection input.
                 // 2. build read columns from predicate.
                 // 3. merge final read columns for read sst logically.
-                //
-                // Note: we can modify the nested_paths in the projection input via
-                // try-swapping with projection or other techniques to reduce I/O when
-                // reading from the underlying SSTs. This also affects the schema of the
-                // data passed to DataFusion.
                 let metadata = &self.version.metadata;
-                let output_cols = read_columns_from_projection(p, metadata)?;
+                let from_projection = read_columns_from_projection(p, metadata)?;
                 let from_predicate = read_columns_from_predicate(&predicate, metadata);
-                merge_read_cols(output_cols, from_predicate)
+                merge_read_cols(from_projection, from_predicate)
             }
             None => {
-                let read_col_ids: Vec<_> = self
+                let read_col_ids = self
                     .version
                     .metadata
                     .column_metadatas
                     .iter()
-                    .map(|col| col.column_id)
-                    .collect();
-                let output_cols = ReadColumns::from_column_ids(read_col_ids);
-                output_cols
+                    .map(|col| col.column_id);
+                ReadColumns::from_column_ids(read_col_ids)
             }
         };
         let read_column_ids = read_cols.column_ids();
 
         // The mapper always computes projected column ids as the schema of SSTs may change.
         let mapper = match self.request.projection_indices() {
-            Some(projection) => ProjectionMapper::new_with_read_columns(
+            Some(p) => ProjectionMapper::new_with_read_columns(
                 &self.version.metadata,
-                projection.iter().copied(),
+                p.iter().copied(),
                 read_cols,
             )?,
             None => ProjectionMapper::all(&self.version.metadata)?,
@@ -476,7 +469,7 @@ impl ScanRegion {
                 continue;
             }
             let ranges_in_memtable = m.ranges(
-                Some(read_column_ids.as_slice()),
+                Some(&read_column_ids),
                 RangesOptions::default()
                     .with_predicate(predicate.clone())
                     .with_sequence(SequenceRange::new(
@@ -1763,7 +1756,7 @@ mod tests {
         let fingerprint = build_scan_fingerprint(&input).unwrap();
 
         let expected = ScanRequestFingerprintBuilder {
-            read_columns: input.read_cols.clone(),
+            read_columns: input.read_cols,
             read_column_types: vec![
                 metadata
                     .column_by_id(0)
@@ -1839,7 +1832,7 @@ mod tests {
         let fingerprint = build_scan_fingerprint(&input).unwrap();
 
         let expected = ScanRequestFingerprintBuilder {
-            read_columns: input.read_cols.clone(),
+            read_columns: input.read_cols,
             read_column_types: vec![
                 metadata
                     .column_by_id(0)

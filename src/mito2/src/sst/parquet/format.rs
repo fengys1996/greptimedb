@@ -137,14 +137,14 @@ pub enum ReadFormat {
 
 impl ReadFormat {
     /// Creates a helper to read the primary key format.
-    pub fn new_primary_key(metadata: RegionMetadataRef, read_cols: ReadColumns) -> Self {
-        ReadFormat::PrimaryKey(PrimaryKeyReadFormat::new(metadata, read_cols))
+    pub fn new_primary_key(metadata: RegionMetadataRef, read_cols: &ReadColumns) -> Self {
+        ReadFormat::PrimaryKey(PrimaryKeyReadFormat::new(metadata, &read_cols))
     }
 
     /// Creates a helper to read the flat format.
     pub fn new_flat(
         metadata: RegionMetadataRef,
-        read_cols: ReadColumns,
+        read_cols: &ReadColumns,
         num_columns: Option<usize>,
         file_path: &str,
         skip_auto_convert: bool,
@@ -161,7 +161,7 @@ impl ReadFormat {
     /// Creates a new read format.
     pub fn new(
         region_metadata: RegionMetadataRef,
-        projection: Option<ReadColumns>,
+        projection: Option<&ReadColumns>,
         flat_format: bool,
         num_columns: Option<usize>,
         file_path: &str,
@@ -186,7 +186,7 @@ impl ReadFormat {
                 );
                 ReadFormat::new_flat(
                     region_metadata.clone(),
-                    read_cols,
+                    &read_cols,
                     num_columns,
                     file_path,
                     skip_auto_convert,
@@ -204,7 +204,7 @@ impl ReadFormat {
             );
             Ok(ReadFormat::new_primary_key(
                 region_metadata.clone(),
-                read_cols,
+                &read_cols,
             ))
         }
     }
@@ -242,7 +242,7 @@ impl ReadFormat {
         }
     }
 
-    /// Gets sorted projection indices to read.
+    /// Gets sorted projection root indices to read.
     pub(crate) fn projection_indices_iter(&self) -> impl Iterator<Item = usize> + '_ {
         self.parquet_read_columns()
             .columns()
@@ -419,7 +419,7 @@ pub struct PrimaryKeyReadFormat {
 
 impl PrimaryKeyReadFormat {
     /// Creates a helper with existing `metadata` and `column_ids` to read.
-    pub fn new(metadata: RegionMetadataRef, read_cols: ReadColumns) -> PrimaryKeyReadFormat {
+    pub fn new(metadata: RegionMetadataRef, read_cols: &ReadColumns) -> PrimaryKeyReadFormat {
         let field_id_to_index: HashMap<_, _> = metadata
             .field_columns()
             .enumerate()
@@ -810,9 +810,9 @@ impl FormatProjection {
     pub(crate) fn compute_format_projection(
         id_to_index: &HashMap<ColumnId, usize>,
         sst_column_num: usize,
-        column_ids: &ReadColumns,
+        cols: &ReadColumns,
     ) -> Self {
-        let projected_columns = Self::collect_projected_columns(id_to_index, column_ids);
+        let projected_columns = Self::collect_projected_columns(id_to_index, cols);
 
         let mut parquet_read_cols: Vec<ParquetReadColumn> =
             Vec::with_capacity(projected_columns.len() + FIXED_POS_COLUMN_NUM);
@@ -933,7 +933,7 @@ impl PrimaryKeyReadFormat {
     pub fn new_with_all_columns(metadata: RegionMetadataRef) -> PrimaryKeyReadFormat {
         let read_cols =
             ReadColumns::from_column_ids(metadata.column_metadatas.iter().map(|c| c.column_id));
-        Self::new(Arc::clone(&metadata), read_cols)
+        Self::new(Arc::clone(&metadata), &read_cols)
     }
 }
 
@@ -1187,7 +1187,7 @@ mod tests {
         let metadata = build_test_region_metadata();
         // Only read tag1
         let read_cols = ReadColumns::from_column_ids([3]);
-        let read_format = ReadFormat::new_primary_key(metadata.clone(), read_cols);
+        let read_format = ReadFormat::new_primary_key(metadata.clone(), &read_cols);
         assert_eq!(
             &[2, 3, 4, 5],
             read_format
@@ -1197,7 +1197,7 @@ mod tests {
         );
         // Only read field1
         let read_cols = ReadColumns::from_column_ids([4]);
-        let read_format = ReadFormat::new_primary_key(metadata.clone(), read_cols);
+        let read_format = ReadFormat::new_primary_key(metadata.clone(), &read_cols);
         assert_eq!(
             &[0, 2, 3, 4, 5],
             read_format
@@ -1207,7 +1207,7 @@ mod tests {
         );
         // Only read ts
         let read_cols = ReadColumns::from_column_ids([5]);
-        let read_format = ReadFormat::new_primary_key(metadata.clone(), read_cols);
+        let read_format = ReadFormat::new_primary_key(metadata.clone(), &read_cols);
         assert_eq!(
             &[2, 3, 4, 5],
             read_format
@@ -1217,7 +1217,7 @@ mod tests {
         );
         // Read field0, tag0, ts
         let read_cols = ReadColumns::from_column_ids([2, 1, 5]);
-        let read_format = ReadFormat::new_primary_key(metadata, read_cols);
+        let read_format = ReadFormat::new_primary_key(metadata, &read_cols);
         assert_eq!(
             &[1, 2, 3, 4, 5],
             read_format
@@ -1270,8 +1270,8 @@ mod tests {
             .iter()
             .map(|col| col.column_id)
             .collect();
-        let read_cols = ReadColumns::from_column_ids(column_ids.iter().copied());
-        let read_format = PrimaryKeyReadFormat::new(metadata, read_cols);
+        let read_cols = ReadColumns::from_column_ids(column_ids);
+        let read_format = PrimaryKeyReadFormat::new(metadata, &read_cols);
         assert_eq!(arrow_schema, *read_format.arrow_schema());
 
         let record_batch = RecordBatch::new_empty(arrow_schema);
@@ -1290,8 +1290,8 @@ mod tests {
             .iter()
             .map(|col| col.column_id)
             .collect();
-        let read_cols = ReadColumns::from_column_ids(column_ids.iter().copied());
-        let read_format = PrimaryKeyReadFormat::new(metadata, read_cols);
+        let read_cols = ReadColumns::from_column_ids(column_ids);
+        let read_format = PrimaryKeyReadFormat::new(metadata, &read_cols);
 
         let columns: Vec<ArrayRef> = vec![
             Arc::new(Int64Array::from(vec![1, 1, 10, 10])), // field1
@@ -1320,7 +1320,7 @@ mod tests {
         let read_cols =
             ReadColumns::from_column_ids(metadata.column_metadatas.iter().map(|c| c.column_id));
         let read_format =
-            ReadFormat::new(metadata, Some(read_cols), false, None, "test", false).unwrap();
+            ReadFormat::new(metadata, Some(&read_cols), false, None, "test", false).unwrap();
 
         let columns: Vec<ArrayRef> = vec![
             Arc::new(Int64Array::from(vec![1, 1, 10, 10])), // field1
@@ -1450,7 +1450,7 @@ mod tests {
         // Only read tag1 (column_id=3, index=1) + fixed columns
         let read_cols = ReadColumns::from_column_ids([3]);
         let read_format =
-            ReadFormat::new_flat(metadata.clone(), read_cols, None, "test", false).unwrap();
+            ReadFormat::new_flat(metadata.clone(), &read_cols, None, "test", false).unwrap();
         assert_eq!(
             &[1, 4, 5, 6, 7],
             read_format
@@ -1462,7 +1462,7 @@ mod tests {
         // Only read field1 (column_id=4, index=2) + fixed columns
         let read_cols = ReadColumns::from_column_ids([4]);
         let read_format =
-            ReadFormat::new_flat(metadata.clone(), read_cols, None, "test", false).unwrap();
+            ReadFormat::new_flat(metadata.clone(), &read_cols, None, "test", false).unwrap();
         assert_eq!(
             &[2, 4, 5, 6, 7],
             read_format
@@ -1474,7 +1474,7 @@ mod tests {
         // Only read ts (column_id=5, index=4) + fixed columns (ts is already included in fixed)
         let read_cols = ReadColumns::from_column_ids([5]);
         let read_format =
-            ReadFormat::new_flat(metadata.clone(), read_cols, None, "test", false).unwrap();
+            ReadFormat::new_flat(metadata.clone(), &read_cols, None, "test", false).unwrap();
         assert_eq!(
             &[4, 5, 6, 7],
             read_format
@@ -1485,7 +1485,7 @@ mod tests {
 
         // Read field0(column_id=2, index=3), tag0(column_id=1, index=0), ts(column_id=5, index=4) + fixed columns
         let read_cols = ReadColumns::from_column_ids([2, 1, 5]);
-        let read_format = ReadFormat::new_flat(metadata, read_cols, None, "test", false).unwrap();
+        let read_format = ReadFormat::new_flat(metadata, &read_cols, None, "test", false).unwrap();
         assert_eq!(
             &[0, 3, 4, 5, 6, 7],
             read_format
@@ -1501,7 +1501,7 @@ mod tests {
         let read_cols = ReadColumns::from_column_ids(std::iter::once(1));
         let mut format = FlatReadFormat::new(
             metadata,
-            read_cols, // Just read tag0
+            &read_cols, // Just read tag0
             Some(8),
             "test",
             false,
@@ -1718,7 +1718,7 @@ mod tests {
             .collect();
         let read_cols = ReadColumns::from_column_ids(column_ids);
         let format =
-            FlatReadFormat::new(metadata.clone(), read_cols, Some(6), "test", false).unwrap();
+            FlatReadFormat::new(metadata.clone(), &read_cols, Some(6), "test", false).unwrap();
 
         let num_rows = 4;
         let original_sequence = 100u64;
@@ -1794,7 +1794,8 @@ mod tests {
             .map(|c| c.column_id)
             .collect();
         let read_cols = ReadColumns::from_column_ids(column_ids.clone());
-        let format = FlatReadFormat::new(metadata.clone(), read_cols, None, "test", false).unwrap();
+        let format =
+            FlatReadFormat::new(metadata.clone(), &read_cols, None, "test", false).unwrap();
 
         let num_rows = 4;
         let original_sequence = 100u64;
@@ -1877,7 +1878,7 @@ mod tests {
         assert_eq!(expected_record_batch, result);
 
         let read_cols = ReadColumns::from_column_ids(column_ids);
-        let format = FlatReadFormat::new(metadata.clone(), read_cols, None, "test", true).unwrap();
+        let format = FlatReadFormat::new(metadata.clone(), &read_cols, None, "test", true).unwrap();
         // Test conversion with sparse encoding and skip convert.
         let result = format.convert_batch(record_batch.clone(), None).unwrap();
         assert_eq!(record_batch, result);

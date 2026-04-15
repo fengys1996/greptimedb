@@ -78,9 +78,10 @@ impl BulkIterContext {
             })
             .collect();
 
+        let projection = projection.map(|cols| ReadColumns::from_column_ids(cols.iter().copied()));
         let read_format = ReadFormat::new(
             region_metadata.clone(),
-            projection.map(|cols| ReadColumns::from_column_ids(cols.iter().copied())),
+            projection.as_ref(),
             true,
             None,
             "memtable",

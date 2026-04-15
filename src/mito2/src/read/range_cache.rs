@@ -821,7 +821,7 @@ mod tests {
     #[test]
     fn normalizes_and_clears_time_filters() {
         let normalized = ScanRequestFingerprintBuilder {
-            read_columns: ReadColumns::from_column_ids(vec![1, 2]),
+            read_columns: ReadColumns::from_column_ids([1, 2]),
             read_column_types: vec![None, None],
             filters: vec!["k0 = 'foo'".to_string()],
             time_filters: vec![],
@@ -836,7 +836,7 @@ mod tests {
         assert!(normalized.time_filters().is_empty());
 
         let fingerprint = ScanRequestFingerprintBuilder {
-            read_columns: ReadColumns::from_column_ids(vec![1, 2]),
+            read_columns: ReadColumns::from_column_ids([1, 2]),
             read_column_types: vec![None, None],
             filters: vec!["k0 = 'foo'".to_string()],
             time_filters: vec!["ts >= 1000".to_string()],

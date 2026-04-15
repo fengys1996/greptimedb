@@ -966,7 +966,7 @@ mod tests {
         let read_cols =
             ReadColumns::from_column_ids(metadata.column_metadatas.iter().map(|c| c.column_id));
         let read_format =
-            ReadFormat::new_flat(metadata.clone(), read_cols, None, "test", true).unwrap();
+            ReadFormat::new_flat(metadata.clone(), &read_cols, None, "test", true).unwrap();
 
         RangeBase {
             filters,

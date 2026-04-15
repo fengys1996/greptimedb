@@ -385,7 +385,7 @@ impl ParquetReaderBuilder {
         };
         let mut read_format = ReadFormat::new(
             region_meta.clone(),
-            Some(read_cols),
+            Some(&read_cols),
             true, // Always reads as flat format.
             Some(parquet_meta.file_metadata().schema_descr().num_columns()),
             &file_path,

@@ -163,7 +163,7 @@ impl FlatReadFormat {
     /// If `skip_auto_convert` is true, skips auto conversion of format when the encoding is sparse encoding.
     pub fn new(
         metadata: RegionMetadataRef,
-        read_cols: ReadColumns,
+        read_cols: &ReadColumns,
         num_columns: Option<usize>,
         file_path: &str,
         skip_auto_convert: bool,
@@ -405,7 +405,7 @@ impl ParquetPrimaryKeyToFlat {
     /// Creates a helper with existing `metadata` and `column_ids` to read.
     fn new(
         metadata: RegionMetadataRef,
-        read_cols: ReadColumns,
+        read_cols: &ReadColumns,
         skip_auto_convert: bool,
     ) -> ParquetPrimaryKeyToFlat {
         assert!(if skip_auto_convert {
@@ -420,7 +420,7 @@ impl ParquetPrimaryKeyToFlat {
             flat_sst_arrow_schema_column_num(&metadata, &FlatSchemaOptions::default());
 
         let codec = build_primary_key_codec(&metadata);
-        let format = PrimaryKeyReadFormat::new(metadata.clone(), read_cols.clone());
+        let format = PrimaryKeyReadFormat::new(metadata.clone(), read_cols);
         let (convert_format, format_projection) = if skip_auto_convert {
             (
                 None,
@@ -434,7 +434,7 @@ impl ParquetPrimaryKeyToFlat {
             let format_projection = FormatProjection::compute_format_projection(
                 &id_to_index,
                 sst_column_num,
-                &read_cols,
+                read_cols,
             );
             (
                 FlatConvertFormat::new(Arc::clone(&metadata), &format_projection, codec),
@@ -472,7 +472,7 @@ struct ParquetFlat {
 
 impl ParquetFlat {
     /// Creates a helper with existing `metadata` and `column_ids` to read.
-    fn new(metadata: RegionMetadataRef, read_cols: ReadColumns) -> ParquetFlat {
+    fn new(metadata: RegionMetadataRef, read_cols: &ReadColumns) -> ParquetFlat {
         // Creates a map to lookup index.
         let id_to_index = sst_column_id_indices(&metadata);
         let arrow_schema = to_flat_sst_arrow_schema(&metadata, &FlatSchemaOptions::default());
@@ -779,7 +779,7 @@ impl FlatReadFormat {
     pub fn new_with_all_columns(metadata: RegionMetadataRef) -> FlatReadFormat {
         let read_cols =
             ReadColumns::from_column_ids(metadata.column_metadatas.iter().map(|c| c.column_id));
-        Self::new(Arc::clone(&metadata), read_cols, None, "test", false).unwrap()
+        Self::new(Arc::clone(&metadata), &read_cols, None, "test", false).unwrap()
     }
 }
 

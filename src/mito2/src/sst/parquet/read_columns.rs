@@ -28,6 +28,12 @@ pub struct ParquetReadColumns {
 }
 
 impl ParquetReadColumns {
+    /// Builds parquet read columns from deduplicated, normalized input.
+    ///
+    /// `cols` must not contain duplicate root indices, and nested paths must
+    /// already be merged. Empty `nested_paths` means reading the whole root column.
+    ///
+    /// This constructor does not validate or merge input.
     pub fn from_deduped(cols: Vec<ParquetReadColumn>) -> Self {
         let has_nested = cols.iter().any(|col| !col.nested_paths.is_empty());
         Self { cols, has_nested }

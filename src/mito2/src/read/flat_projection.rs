@@ -94,7 +94,10 @@ impl FlatProjectionMapper {
         // If the original projection is empty.
         let is_empty_projection = projection.is_empty();
 
+        // Output column schemas for the projection.
         let mut col_schemas = Vec::with_capacity(projection.len());
+        // Column ids of the output projection without deduplication.
+        let mut output_column_ids = Vec::with_capacity(projection.len());
         for idx in &projection {
             let col = metadata
                 .column_metadatas
@@ -103,6 +106,7 @@ impl FlatProjectionMapper {
                     region_id: metadata.region_id,
                     reason: format!("projection index {} is out of bound", idx),
                 })?;
+            output_column_ids.push(col.column_id);
             col_schemas.push(col.column_schema.clone());
         }
 
@@ -133,24 +137,17 @@ impl FlatProjectionMapper {
         let batch_indices = if is_empty_projection {
             vec![]
         } else {
-            projection
+            output_column_ids
                 .iter()
-                .map(|idx| {
-                    let column = metadata.column_metadatas.get(*idx).with_context(|| {
-                        InvalidRequestSnafu {
-                            region_id: metadata.region_id,
-                            reason: format!("projection index {} is out of bound", idx),
-                        }
-                    })?;
-                    let id = column.column_id;
+                .map(|id| {
                     // Safety: The map is computed from the read projection.
                     format_projection
                         .column_id_to_projected_index
-                        .get(&id)
+                        .get(id)
                         .copied()
                         .with_context(|| {
                             let name = metadata
-                                .column_by_id(id)
+                                .column_by_id(*id)
                                 .map(|column| column.column_schema.name.clone())
                                 .unwrap_or_else(|| id.to_string());
                             InvalidRequestSnafu {
@@ -185,7 +182,7 @@ impl FlatProjectionMapper {
     pub(crate) fn metadata(&self) -> &RegionMetadataRef {
         &self.metadata
     }
-
+    /// Returns projected columns that we need to read from memtables and SSTs.
     pub(crate) fn read_columns(&self) -> &ReadColumns {
         &self.read_cols
     }

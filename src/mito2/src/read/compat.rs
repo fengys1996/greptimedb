@@ -1217,7 +1217,7 @@ mod tests {
         let mapper = FlatProjectionMapper::all(&expected_metadata).unwrap();
         let read_cols = ReadColumns::from_column_ids([0, 1, 2, 3]);
         let read_format =
-            FlatReadFormat::new(actual_metadata.clone(), read_cols, None, "test", false).unwrap();
+            FlatReadFormat::new(actual_metadata.clone(), &read_cols, None, "test", false).unwrap();
         let format_projection = read_format.format_projection();
 
         let compat_batch =
@@ -1306,7 +1306,7 @@ mod tests {
         .unwrap();
         let read_cols = ReadColumns::from_column_ids([1, 2, 3]);
         let read_format =
-            FlatReadFormat::new(actual_metadata.clone(), read_cols, None, "test", false).unwrap();
+            FlatReadFormat::new(actual_metadata.clone(), &read_cols, None, "test", false).unwrap();
         let format_projection = read_format.format_projection();
 
         let compat_batch =
@@ -1392,7 +1392,7 @@ mod tests {
         let mapper = FlatProjectionMapper::all(&expected_metadata).unwrap();
         let read_cols = ReadColumns::from_column_ids([0, 1, 2, 3]);
         let read_format =
-            FlatReadFormat::new(actual_metadata.clone(), read_cols, None, "test", false).unwrap();
+            FlatReadFormat::new(actual_metadata.clone(), &read_cols, None, "test", false).unwrap();
         let format_projection = read_format.format_projection();
 
         let compat_batch =
@@ -1481,7 +1481,7 @@ mod tests {
         let mapper = FlatProjectionMapper::all(&expected_metadata).unwrap();
         let read_cols = ReadColumns::from_column_ids([0, 2, 3]);
         let read_format =
-            FlatReadFormat::new(actual_metadata.clone(), read_cols, None, "test", true).unwrap();
+            FlatReadFormat::new(actual_metadata.clone(), &read_cols, None, "test", true).unwrap();
         let format_projection = read_format.format_projection();
 
         let compat_batch =
