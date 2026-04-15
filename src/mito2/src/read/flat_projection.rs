@@ -80,8 +80,12 @@ impl FlatProjectionMapper {
     ) -> Result<Self> {
         let projection: Vec<_> = projection.collect();
         let read_column_ids = read_column_ids_from_projection(metadata, &projection)?;
-        let projection_input = ProjectionInput::new(projection);
-        let output_cols = read_columns_from_projection(&projection_input, metadata)?;
+        let output_cols = if projection.is_empty() {
+            ReadColumns::default()
+        } else {
+            let projection_input = ProjectionInput::new(projection);
+            read_columns_from_projection(&projection_input, metadata)?
+        };
         Self::new_with_read_columns(metadata, output_cols, read_column_ids)
     }
 
