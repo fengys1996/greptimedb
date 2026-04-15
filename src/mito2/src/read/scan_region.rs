@@ -393,7 +393,7 @@ impl ScanRegion {
         let time_range = self.build_time_range_predicate();
         let predicate = PredicateGroup::new(&self.version.metadata, &self.request.filters)?;
 
-        let (output_cols, read_cols) = match &self.request.projection_input {
+        let read_cols = match &self.request.projection_input {
             Some(p) => {
                 // 1. build read columns from projection input.
                 // 2. build read columns from predicate.
@@ -406,8 +406,7 @@ impl ScanRegion {
                 let metadata = &self.version.metadata;
                 let output_cols = read_columns_from_projection(p, metadata)?;
                 let from_predicate = read_columns_from_predicate(&predicate, metadata);
-                let read_cols = merge_read_cols(output_cols.clone(), from_predicate);
-                (output_cols, read_cols)
+                merge_read_cols(output_cols, from_predicate)
             }
             None => {
                 let read_col_ids: Vec<_> = self
@@ -418,16 +417,16 @@ impl ScanRegion {
                     .map(|col| col.column_id)
                     .collect();
                 let output_cols = ReadColumns::from_column_ids(read_col_ids);
-                (output_cols.clone(), output_cols)
+                output_cols
             }
         };
         let read_column_ids = read_cols.column_ids();
 
         // The mapper always computes projected column ids as the schema of SSTs may change.
         let mapper = match self.request.projection_indices() {
-            Some(_projection_input) => ProjectionMapper::new_with_read_columns(
+            Some(projection) => ProjectionMapper::new_with_read_columns(
                 &self.version.metadata,
-                output_cols,
+                projection.iter().copied(),
                 read_cols,
             )?,
             None => ProjectionMapper::all(&self.version.metadata)?,

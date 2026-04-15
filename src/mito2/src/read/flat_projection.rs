@@ -30,12 +30,12 @@ use datatypes::value::Value;
 use datatypes::vectors::Helper;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
-use store_api::storage::{ColumnId, ProjectionInput};
+use store_api::storage::ColumnId;
 
 use crate::cache::CacheStrategy;
 use crate::error::{InvalidRequestSnafu, RecordBatchSnafu, Result};
 use crate::read::projection::{read_column_ids_from_projection, repeated_vector_with_cache};
-use crate::read::read_columns::{ReadColumns, read_columns_from_projection};
+use crate::read::read_columns::ReadColumns;
 use crate::sst::parquet::flat_format::sst_column_id_indices;
 use crate::sst::parquet::format::FormatProjection;
 use crate::sst::{
@@ -70,49 +70,40 @@ pub struct FlatProjectionMapper {
 }
 
 impl FlatProjectionMapper {
-    /// Returns a new mapper with projection.
+    /// Builds a mapper from a user projection.
     /// If `projection` is empty, it outputs [RecordBatch] without any column but only a row count.
     /// `SELECT COUNT(*) FROM table` is an example that uses an empty projection. DataFusion accepts
     /// empty `RecordBatch` and only use its row count in this query.
     pub fn new(
         metadata: &RegionMetadataRef,
-        projection: impl Iterator<Item = usize>,
+        projection: impl IntoIterator<Item = usize>,
     ) -> Result<Self> {
-        let projection: Vec<_> = projection.collect();
+        let projection: Vec<_> = projection.into_iter().collect();
         let read_column_ids = read_column_ids_from_projection(metadata, &projection)?;
-        let output_cols = if projection.is_empty() {
-            ReadColumns::default()
-        } else {
-            let projection_input = ProjectionInput::new(projection);
-            read_columns_from_projection(&projection_input, metadata)?
-        };
-        Self::new_with_read_columns(metadata, output_cols, read_column_ids)
+        Self::new_with_read_columns(metadata, projection, read_column_ids)
     }
 
-    /// Returns a new mapper with output projection and explicit read columns.
+    /// Builds a mapper from a user projection and explicit read columns.
     pub fn new_with_read_columns(
         metadata: &RegionMetadataRef,
-        output_cols: impl Into<ReadColumns>,
+        projection: impl IntoIterator<Item = usize>,
         read_cols: impl Into<ReadColumns>,
     ) -> Result<Self> {
-        let output_cols = output_cols.into();
+        let projection: Vec<_> = projection.into_iter().collect();
         let read_cols = read_cols.into();
         // If the original projection is empty.
-        let is_empty_projection = output_cols.is_empty();
+        let is_empty_projection = projection.is_empty();
 
-        let mut col_schemas = Vec::with_capacity(output_cols.columns().len());
-        for read_col in output_cols.columns() {
-            let col_id = read_col.column_id();
+        let mut col_schemas = Vec::with_capacity(projection.len());
+        for idx in &projection {
             let col = metadata
-                .column_by_id(col_id)
+                .column_metadatas
+                .get(*idx)
                 .with_context(|| InvalidRequestSnafu {
                     region_id: metadata.region_id,
-                    reason: format!("col id {} is invalid", col_id),
+                    reason: format!("projection index {} is out of bound", idx),
                 })?;
-            // TODO(fys): try use col.nested path to prune the column schema
-            // if it is a nested field.
-            let col_schema = col.column_schema.clone();
-            col_schemas.push(col_schema);
+            col_schemas.push(col.column_schema.clone());
         }
 
         // Creates a map to lookup index.
@@ -142,9 +133,16 @@ impl FlatProjectionMapper {
         let batch_indices = if is_empty_projection {
             vec![]
         } else {
-            output_cols
-                .column_ids_iter()
-                .map(|id| {
+            projection
+                .iter()
+                .map(|idx| {
+                    let column = metadata.column_metadatas.get(*idx).with_context(|| {
+                        InvalidRequestSnafu {
+                            region_id: metadata.region_id,
+                            reason: format!("projection index {} is out of bound", idx),
+                        }
+                    })?;
+                    let id = column.column_id;
                     // Safety: The map is computed from the read projection.
                     format_projection
                         .column_id_to_projected_index
@@ -473,10 +471,8 @@ impl CompactionProjectionMapper {
             .iter()
             .map(|col| col.column_id)
             .collect();
-        let output_cols =
-            read_columns_from_projection(&ProjectionInput::new(projection), metadata)?;
         let mapper =
-            FlatProjectionMapper::new_with_read_columns(metadata, output_cols, read_column_ids)?;
+            FlatProjectionMapper::new_with_read_columns(metadata, projection, read_column_ids)?;
         let assembler = DfBatchAssembler::new(mapper.output_schema());
 
         Ok(Self { mapper, assembler })

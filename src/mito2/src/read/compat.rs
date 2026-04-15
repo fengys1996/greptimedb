@@ -986,11 +986,11 @@ mod tests {
     };
     use store_api::codec::PrimaryKeyEncoding;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
-    use store_api::storage::{ProjectionInput, RegionId};
+    use store_api::storage::RegionId;
 
     use super::*;
     use crate::read::flat_projection::FlatProjectionMapper;
-    use crate::read::read_columns::{ReadColumns, read_columns_from_projection};
+    use crate::read::read_columns::ReadColumns;
     use crate::sst::parquet::flat_format::FlatReadFormat;
     use crate::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
 
@@ -1298,12 +1298,9 @@ mod tests {
             &[1],
         ));
 
-        let projection_input = ProjectionInput::new(vec![1, 2]);
-        let output_cols =
-            read_columns_from_projection(&projection_input, &expected_metadata).unwrap();
         let mapper = FlatProjectionMapper::new_with_read_columns(
             &expected_metadata,
-            output_cols,
+            vec![1, 2],
             vec![1, 2, 3],
         )
         .unwrap();
