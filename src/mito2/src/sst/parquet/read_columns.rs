@@ -28,7 +28,7 @@ pub struct ParquetReadColumns {
 }
 
 impl ParquetReadColumns {
-    pub fn new(cols: Vec<ParquetReadColumn>) -> Self {
+    pub fn from_deduped(cols: Vec<ParquetReadColumn>) -> Self {
         let has_nested = cols.iter().any(|col| !col.nested_paths.is_empty());
         Self { cols, has_nested }
     }

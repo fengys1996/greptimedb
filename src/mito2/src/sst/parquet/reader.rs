@@ -79,7 +79,7 @@ use crate::sst::parquet::metadata::MetadataLoader;
 use crate::sst::parquet::prefilter::{
     PrefilterContextBuilder, execute_prefilter, is_usable_primary_key_filter,
 };
-use crate::sst::parquet::read_columns::{ParquetReadColumns, build_projection_mask};
+use crate::sst::parquet::read_columns::build_projection_mask;
 use crate::sst::parquet::row_group::ParquetFetchMetrics;
 use crate::sst::parquet::row_selection::RowGroupSelection;
 use crate::sst::parquet::stats::RowGroupPruningStats;
@@ -401,8 +401,7 @@ impl ParquetReaderBuilder {
 
         // Computes the projection mask.
         let parquet_schema_desc = parquet_meta.file_metadata().schema_descr();
-        let parquet_read_cols =
-            ParquetReadColumns::from_deduped_root_indices(read_format.projection_indices_iter());
+        let parquet_read_cols = read_format.parquet_read_columns();
         let projection_mask = build_projection_mask(&parquet_read_cols, parquet_schema_desc);
         let selection = self
             .row_groups_to_read(&read_format, &parquet_meta, &mut metrics.filter_metrics)

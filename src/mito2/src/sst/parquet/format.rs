@@ -826,7 +826,7 @@ impl FormatProjection {
         Self::append_fixed_root_columns(&mut parquet_read_cols, sst_column_num);
 
         Self {
-            parquet_read_cols: ParquetReadColumns::new(parquet_read_cols),
+            parquet_read_cols: ParquetReadColumns::from_deduped(parquet_read_cols),
             column_id_to_projected_index,
         }
     }
