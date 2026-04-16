@@ -57,7 +57,7 @@ use crate::read::projection::ProjectionMapper;
 use crate::read::range::{FileRangeBuilder, MemRangeBuilder, RangeMeta, RowGroupIndex};
 use crate::read::range_cache::ScanRequestFingerprint;
 use crate::read::read_columns::{
-    ReadColumns, merge_read_cols, read_columns_from_predicate, read_columns_from_projection,
+    ReadColumns, merge, read_columns_from_predicate, read_columns_from_projection,
 };
 use crate::read::seq_scan::SeqScan;
 use crate::read::series_scan::SeriesScan;
@@ -401,7 +401,7 @@ impl ScanRegion {
                 let metadata = &self.version.metadata;
                 let from_projection = read_columns_from_projection(p, metadata)?;
                 let from_predicate = read_columns_from_predicate(&predicate, metadata);
-                merge_read_cols(from_projection, from_predicate)
+                merge(from_projection, from_predicate)
             }
             None => {
                 let read_col_ids = self
@@ -1326,8 +1326,7 @@ pub(crate) fn build_scan_fingerprint(input: &ScanInput) -> Option<ScanRequestFin
     Some(
         crate::read::range_cache::ScanRequestFingerprintBuilder {
             read_column_types: read_columns
-                .column_ids()
-                .iter()
+                .column_ids_iter()
                 .map(|id| {
                     metadata
                         .column_by_id(*id)

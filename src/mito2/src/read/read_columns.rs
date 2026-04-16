@@ -124,7 +124,7 @@ impl From<Vec<ColumnId>> for ReadColumns {
     }
 }
 
-pub fn merge_read_cols(a: ReadColumns, b: ReadColumns) -> ReadColumns {
+pub fn merge(a: ReadColumns, b: ReadColumns) -> ReadColumns {
     let mut merged = BTreeMap::<u32, Vec<NestedPath>>::new();
 
     for col in a.cols.into_iter().chain(b.cols) {
@@ -377,7 +377,7 @@ mod tests {
             cols: vec![ReadColumn::new(2, vec![])],
         };
 
-        let merged = merge_read_cols(a, b);
+        let merged = merge(a, b);
 
         assert_eq!(
             merged,
@@ -403,7 +403,7 @@ mod tests {
             )],
         };
 
-        let merged = merge_read_cols(a, b);
+        let merged = merge(a, b);
 
         assert_eq!(
             merged,
@@ -435,7 +435,7 @@ mod tests {
             ],
         };
 
-        let merged = merge_read_cols(a, b);
+        let merged = merge(a, b);
 
         assert_eq!(
             merged,
@@ -464,7 +464,7 @@ mod tests {
             cols: vec![ReadColumn::new(1, vec![nested_path(&["j", "a"])])],
         };
 
-        let merged = merge_read_cols(a, b);
+        let merged = merge(a, b);
 
         assert_eq!(
             merged,
