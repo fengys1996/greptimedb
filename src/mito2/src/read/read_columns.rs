@@ -96,7 +96,7 @@ impl ReadColumns {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ReadColumn {
     column_id: ColumnId,
-    /// Nested filed paths under this column.
+    /// Nested field paths under this column.
     /// Empty means reading the whole column.
     nested_paths: Vec<NestedPath>,
 }

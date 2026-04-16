@@ -1329,7 +1329,7 @@ pub(crate) fn build_scan_fingerprint(input: &ScanInput) -> Option<ScanRequestFin
                 .column_ids_iter()
                 .map(|id| {
                     metadata
-                        .column_by_id(*id)
+                        .column_by_id(id)
                         .map(|col| col.column_schema.data_type.clone())
                 })
                 .collect(),
