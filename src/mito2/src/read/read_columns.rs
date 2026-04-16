@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::{BTreeMap, HashSet};
+use std::mem;
 
 use datafusion_common::HashMap;
 use datafusion_expr::utils::expr_to_columns;
@@ -91,6 +92,15 @@ impl ReadColumns {
     pub fn columns(&self) -> &[ReadColumn] {
         &self.cols
     }
+
+    pub fn estimated_size(&self) -> usize {
+        self.cols.capacity() * mem::size_of::<ReadColumn>()
+            + self
+                .cols
+                .iter()
+                .map(ReadColumn::estimated_size)
+                .sum::<usize>()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -115,6 +125,18 @@ impl ReadColumn {
 
     pub fn nested_paths(&self) -> &[NestedPath] {
         &self.nested_paths
+    }
+
+    pub fn estimated_size(&self) -> usize {
+        self.nested_paths.capacity() * mem::size_of::<NestedPath>()
+            + self
+                .nested_paths
+                .iter()
+                .map(|path| {
+                    path.capacity() * mem::size_of::<String>()
+                        + path.iter().map(|node| node.capacity()).sum::<usize>()
+                })
+                .sum::<usize>()
     }
 }
 

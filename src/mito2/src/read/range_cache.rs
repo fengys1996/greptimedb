@@ -156,7 +156,7 @@ impl ScanRequestFingerprint {
 
     pub(crate) fn estimated_size(&self) -> usize {
         mem::size_of::<SharedScanRequestFingerprint>()
-            + mem::size_of_val(self.inner.read_columns.columns())
+            + self.inner.read_columns.estimated_size()
             + self.inner.read_column_types.capacity() * mem::size_of::<Option<ConcreteDataType>>()
             + self.inner.filters.capacity() * mem::size_of::<String>()
             + self
