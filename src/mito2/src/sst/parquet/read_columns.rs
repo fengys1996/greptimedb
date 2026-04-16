@@ -106,6 +106,17 @@ impl ParquetReadColumn {
         }
     }
 
+    /// Merges additional nested paths into this root column.
+    pub fn merge_nested_paths(&mut self, nested_paths: Vec<ParquetNestedPath>) {
+        let reads_whole_root = self.nested_paths.is_empty() || nested_paths.is_empty();
+        if reads_whole_root {
+            // Empty nested paths means reading the whole root column.
+            self.nested_paths = vec![];
+        } else {
+            self.nested_paths.extend(nested_paths);
+        }
+    }
+
     pub fn root_index(&self) -> usize {
         self.root_index
     }
@@ -266,6 +277,32 @@ mod tests {
             vec![0, 2],
             build_parquet_leaves_indices(&parquet_schema_desc, &projection)
         );
+    }
+
+    #[test]
+    fn test_merge_nested_paths_extends_paths() {
+        let mut col = ParquetReadColumn::new(0)
+            .with_nested_paths(vec![vec!["j".to_string(), "a".to_string()]]);
+
+        col.merge_nested_paths(vec![vec!["j".to_string(), "b".to_string()]]);
+
+        assert_eq!(
+            &[
+                vec!["j".to_string(), "a".to_string()],
+                vec!["j".to_string(), "b".to_string()],
+            ],
+            col.nested_paths()
+        );
+    }
+
+    #[test]
+    fn test_merge_nested_paths_with_whole_root() {
+        let mut col = ParquetReadColumn::new(0)
+            .with_nested_paths(vec![vec!["j".to_string(), "a".to_string()]]);
+
+        col.merge_nested_paths(vec![]);
+
+        assert!(col.nested_paths().is_empty());
     }
 
     // Test schema:

@@ -812,15 +812,33 @@ impl FormatProjection {
         sst_column_num: usize,
         cols: &ReadColumns,
     ) -> Self {
-        let projected_columns = Self::collect_projected_columns(id_to_index, cols);
+        let mut projected_columns: Vec<_> = cols
+            .columns()
+            .iter()
+            .filter_map(|col| {
+                id_to_index
+                    .get(&col.column_id())
+                    .copied()
+                    .map(|index_of_sst| {
+                        let nested_paths = col.nested_paths().to_vec();
+                        (col.column_id(), index_of_sst, nested_paths)
+                    })
+            })
+            .collect();
+        projected_columns.sort_unstable_by_key(|(_, index, _)| *index);
 
         let mut parquet_read_cols: Vec<ParquetReadColumn> =
             Vec::with_capacity(projected_columns.len() + FIXED_POS_COLUMN_NUM);
+        // Creates a map from column id to the index of that column in the projected record batch.
         let mut column_id_to_projected_index = HashMap::with_capacity(projected_columns.len());
 
-        for (column_id, index_of_sst, nested_paths) in projected_columns {
+        for (col_id, index_of_sst, nested_paths) in projected_columns {
             Self::merge_or_push_parquet_column(&mut parquet_read_cols, index_of_sst, nested_paths);
-            Self::insert_projected_index(&mut column_id_to_projected_index, column_id);
+
+            if !column_id_to_projected_index.contains_key(&col_id) {
+                let projected_index = column_id_to_projected_index.len();
+                column_id_to_projected_index.insert(col_id, projected_index);
+            }
         }
 
         Self::append_fixed_root_columns(&mut parquet_read_cols, sst_column_num);
@@ -831,60 +849,21 @@ impl FormatProjection {
         }
     }
 
-    fn collect_projected_columns(
-        id_to_index: &HashMap<ColumnId, usize>,
-        column_ids: &ReadColumns,
-    ) -> Vec<(ColumnId, usize, Vec<Vec<String>>)> {
-        let mut projected_columns: Vec<_> = column_ids
-            .columns()
-            .iter()
-            .filter_map(|column| {
-                id_to_index
-                    .get(&column.column_id())
-                    .copied()
-                    .map(|index_of_sst| {
-                        let nested_paths = column.nested_paths().to_vec();
-                        (column.column_id(), index_of_sst, nested_paths)
-                    })
-            })
-            .collect();
-        projected_columns.sort_unstable_by_key(|(_, index, _)| *index);
-        projected_columns
-    }
-
-    fn insert_projected_index(
-        column_id_to_projected_index: &mut HashMap<ColumnId, usize>,
-        column_id: ColumnId,
-    ) {
-        if !column_id_to_projected_index.contains_key(&column_id) {
-            let projected_index = column_id_to_projected_index.len();
-            column_id_to_projected_index.insert(column_id, projected_index);
-        }
-    }
-
     fn merge_or_push_parquet_column(
         parquet_read_cols: &mut Vec<ParquetReadColumn>,
-        index: usize,
+        index_of_sst: usize,
         nested_paths: Vec<Vec<String>>,
     ) {
+        // `projected_columns` is sorted by parquet root index, so repeated reads
+        // for the same root column are always adjacent.
         if let Some(last_col) = parquet_read_cols.last_mut()
-            && last_col.root_index() == index
+            && last_col.root_index() == index_of_sst
         {
-            if last_col.nested_paths().is_empty() || nested_paths.is_empty() {
-                *last_col = ParquetReadColumn::new(index);
-            } else {
-                let mut merged_paths = last_col.nested_paths().to_vec();
-                merged_paths.extend(nested_paths);
-                *last_col = ParquetReadColumn::new(index).with_nested_paths(merged_paths);
-            }
+            last_col.merge_nested_paths(nested_paths);
             return;
         }
 
-        let parquet_col = if nested_paths.is_empty() {
-            ParquetReadColumn::new(index)
-        } else {
-            ParquetReadColumn::new(index).with_nested_paths(nested_paths)
-        };
+        let parquet_col = ParquetReadColumn::new(index_of_sst).with_nested_paths(nested_paths);
         parquet_read_cols.push(parquet_col);
     }
 
