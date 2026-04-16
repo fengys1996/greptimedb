@@ -25,7 +25,7 @@ use common_recordbatch::filter::SimpleFilterEvaluator;
 use common_telemetry::{tracing, warn};
 use datafusion_expr::Expr;
 use datatypes::arrow::array::ArrayRef;
-use datatypes::arrow::datatypes::Field;
+use datatypes::arrow::datatypes::{Field, Schema as ArrowSchema};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::DataType;
@@ -34,7 +34,7 @@ use mito_codec::row_converter::build_primary_key_codec;
 use object_store::ObjectStore;
 use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::{ArrowReaderMetadata, ArrowReaderOptions, RowSelection};
-use parquet::arrow::async_reader::{ParquetRecordBatchStream, ParquetRecordBatchStreamBuilder};
+use parquet::arrow::async_reader::ParquetRecordBatchStreamBuilder;
 use parquet::file::metadata::{PageIndexPolicy, ParquetMetaData};
 use partition::expr::PartitionExpr;
 use snafu::ResultExt;
@@ -76,6 +76,9 @@ use crate::sst::parquet::file_range::{
 };
 use crate::sst::parquet::format::{ReadFormat, need_override_sequence};
 use crate::sst::parquet::metadata::MetadataLoader;
+use crate::sst::parquet::missing_col_filler::{
+    MissingColFillPlan, MissingColFiller, MissingRootCol, PresentColMapping,
+};
 use crate::sst::parquet::prefilter::{
     PrefilterContextBuilder, execute_prefilter, is_usable_primary_key_filter,
 };
@@ -402,7 +405,12 @@ impl ParquetReaderBuilder {
         // Computes the projection mask.
         let parquet_schema_desc = parquet_meta.file_metadata().schema_descr();
         let parquet_read_cols = read_format.parquet_read_columns();
-        let projection_mask = build_projection_mask(parquet_read_cols, parquet_schema_desc);
+        let projection_info = build_projection_mask(parquet_read_cols, parquet_schema_desc);
+        let missing_col_fill_plan = build_missing_col_fill_plan(
+            &read_format,
+            parquet_read_cols,
+            &projection_info.missing_root_indices,
+        );
         let selection = self
             .row_groups_to_read(&read_format, &parquet_meta, &mut metrics.filter_metrics)
             .await;
@@ -487,7 +495,8 @@ impl ParquetReaderBuilder {
             parquet_meta,
             arrow_metadata,
             object_store: self.object_store.clone(),
-            projection: projection_mask,
+            projection: projection_info.mask,
+            missing_col_fill_plan,
             cache_strategy: self.cache_strategy.clone(),
             prefilter_builder,
         };
@@ -1636,6 +1645,8 @@ pub(crate) struct RowGroupReaderBuilder {
     object_store: ObjectStore,
     /// Projection mask.
     projection: ProjectionMask,
+    /// Optional plan to fill missing projected root columns after parquet decoding.
+    missing_col_fill_plan: Option<MissingColFillPlan>,
     /// Cache.
     cache_strategy: CacheStrategy,
     /// Pre-built prefilter state. `None` if prefiltering is not applicable.
@@ -1690,7 +1701,7 @@ impl RowGroupReaderBuilder {
     pub(crate) async fn build(
         &self,
         build_ctx: RowGroupBuildContext<'_>,
-    ) -> Result<ParquetRecordBatchStream<SstAsyncFileReader>> {
+    ) -> Result<MissingColFiller> {
         let prefilter_ctx = self.prefilter_builder.as_ref().map(|b| b.build());
 
         let Some(mut prefilter_ctx) = prefilter_ctx else {
@@ -1731,7 +1742,7 @@ impl RowGroupReaderBuilder {
         row_selection: Option<RowSelection>,
         projection: ProjectionMask,
         fetch_metrics: Option<&ParquetFetchMetrics>,
-    ) -> Result<ParquetRecordBatchStream<SstAsyncFileReader>> {
+    ) -> Result<MissingColFiller> {
         // Create async file reader with caching support.
         let async_reader = SstAsyncFileReader::new(
             self.file_handle.file_id(),
@@ -1761,8 +1772,63 @@ impl RowGroupReaderBuilder {
             path: &self.file_path,
         })?;
 
-        Ok(stream)
+        Ok(match &self.missing_col_fill_plan {
+            Some(plan) => MissingColFiller::new(
+                stream,
+                self.file_path.clone(),
+                plan.output_schema.clone(),
+                plan.present_col_mappings.clone(),
+                plan.missing_cols.clone(),
+            ),
+            None => MissingColFiller::new(
+                stream,
+                self.file_path.clone(),
+                self.arrow_metadata.schema().clone(),
+                vec![],
+                vec![],
+            ),
+        })
     }
+}
+
+fn build_missing_col_fill_plan(
+    read_format: &ReadFormat,
+    parquet_read_cols: &crate::sst::parquet::read_columns::ParquetReadColumns,
+    missing_root_indices: &[usize],
+) -> Option<MissingColFillPlan> {
+    if missing_root_indices.is_empty() {
+        return None;
+    }
+
+    let mut output_fields = Vec::with_capacity(parquet_read_cols.columns().len());
+    let mut present_col_mappings = Vec::with_capacity(parquet_read_cols.columns().len());
+    let mut missing_cols = Vec::with_capacity(missing_root_indices.len());
+    let mut source_idx = 0;
+    let arrow_schema = read_format.arrow_schema();
+
+    for (expected_pos, col) in parquet_read_cols.columns().iter().enumerate() {
+        let field = Arc::new(arrow_schema.field(col.root_index()).clone());
+        output_fields.push(field.clone());
+
+        if missing_root_indices.contains(&col.root_index()) {
+            missing_cols.push(MissingRootCol {
+                expected_pos,
+                field,
+            });
+        } else {
+            present_col_mappings.push(PresentColMapping {
+                source_idx,
+                expected_pos,
+            });
+            source_idx += 1;
+        }
+    }
+
+    Some(MissingColFillPlan {
+        output_schema: Arc::new(ArrowSchema::new(output_fields)),
+        present_col_mappings,
+        missing_cols,
+    })
 }
 
 /// The filter to evaluate or the prune result of the default value.
@@ -2003,17 +2069,11 @@ impl ParquetReader {
 /// between different `RowGroupReader`s.
 pub(crate) trait RowGroupReaderContext: Send {
     fn read_format(&self) -> &ReadFormat;
-
-    fn file_path(&self) -> &str;
 }
 
 impl RowGroupReaderContext for FileRangeContextRef {
     fn read_format(&self) -> &ReadFormat {
         self.as_ref().read_format()
-    }
-
-    fn file_path(&self) -> &str {
-        self.as_ref().file_path()
     }
 }
 
@@ -2023,10 +2083,7 @@ pub(crate) type RowGroupReader = RowGroupReaderBase<FileRangeContextRef>;
 #[allow(dead_code)]
 impl RowGroupReader {
     /// Creates a new reader from file range.
-    pub(crate) fn new(
-        context: FileRangeContextRef,
-        stream: ParquetRecordBatchStream<SstAsyncFileReader>,
-    ) -> Self {
+    pub(crate) fn new(context: FileRangeContextRef, stream: MissingColFiller) -> Self {
         Self::create(context, stream)
     }
 }
@@ -2036,7 +2093,7 @@ pub(crate) struct RowGroupReaderBase<T> {
     /// Context of [RowGroupReader] so adapts to different underlying implementation.
     context: T,
     /// Inner parquet record batch stream.
-    stream: ParquetRecordBatchStream<SstAsyncFileReader>,
+    stream: MissingColFiller,
     /// Buffered batches to return.
     batches: VecDeque<Batch>,
     /// Local scan metrics.
@@ -2051,7 +2108,7 @@ where
     T: RowGroupReaderContext,
 {
     /// Creates a new reader to read the primary key format.
-    pub(crate) fn create(context: T, stream: ParquetRecordBatchStream<SstAsyncFileReader>) -> Self {
+    pub(crate) fn create(context: T, stream: MissingColFiller) -> Self {
         // The batch length from the reader should be less than or equal to DEFAULT_READ_BATCH_SIZE.
         let override_sequence = context
             .read_format()
@@ -2079,12 +2136,7 @@ where
 
     /// Tries to fetch next [RecordBatch] from the stream asynchronously.
     async fn fetch_next_record_batch(&mut self) -> Result<Option<RecordBatch>> {
-        match self.stream.next().await.transpose() {
-            Ok(batch) => Ok(batch),
-            Err(e) => Err(e).context(ReadParquetSnafu {
-                path: self.context.file_path(),
-            }),
-        }
+        self.stream.next().await.transpose()
     }
 
     /// Returns the next [Batch].
@@ -2138,17 +2190,14 @@ pub(crate) struct FlatRowGroupReader {
     /// Context for file ranges.
     context: FileRangeContextRef,
     /// Inner parquet record batch stream.
-    stream: ParquetRecordBatchStream<SstAsyncFileReader>,
+    stream: MissingColFiller,
     /// Cached sequence array to override sequences.
     override_sequence: Option<ArrayRef>,
 }
 
 impl FlatRowGroupReader {
     /// Creates a new flat reader from file range.
-    pub(crate) fn new(
-        context: FileRangeContextRef,
-        stream: ParquetRecordBatchStream<SstAsyncFileReader>,
-    ) -> Self {
+    pub(crate) fn new(context: FileRangeContextRef, stream: MissingColFiller) -> Self {
         // The batch length from the reader should be less than or equal to DEFAULT_READ_BATCH_SIZE.
         let override_sequence = context
             .read_format()
@@ -2165,9 +2214,7 @@ impl FlatRowGroupReader {
     pub(crate) async fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
         match self.stream.next().await {
             Some(batch_result) => {
-                let record_batch = batch_result.context(ReadParquetSnafu {
-                    path: self.context.file_path(),
-                })?;
+                let record_batch = batch_result?;
 
                 // Safety: Only flat format use FlatRowGroupReader.
                 let flat_format = self.context.read_format().as_flat().unwrap();

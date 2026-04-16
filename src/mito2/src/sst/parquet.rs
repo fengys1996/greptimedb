@@ -30,6 +30,7 @@ pub mod flat_format;
 pub mod format;
 pub(crate) mod helper;
 pub(crate) mod metadata;
+pub(crate) mod missing_col_filler;
 pub mod prefilter;
 pub mod read_columns;
 pub mod reader;
