@@ -410,7 +410,7 @@ impl ParquetReaderBuilder {
             read_format.projection_indices().iter().copied(),
         );
 
-        let projection_mask = build_projection_mask(&parquet_read_cols, parquet_schema_desc);
+        let projection_mask = build_projection_mask(&parquet_read_cols, parquet_schema_desc).mask;
         let selection = self
             .row_groups_to_read(&read_format, &parquet_meta, &mut metrics.filter_metrics)
             .await;

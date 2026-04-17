@@ -104,30 +104,76 @@ impl ParquetReadColumn {
     }
 }
 
-/// Builds a projection mask from parquet read columns.
+/// Projection plan built for a parquet file.
+pub struct ProjectionMaskPlan {
+    /// `mask` is the projection mask applied to the parquet reader.
+    pub mask: ProjectionMask,
+    /// `unmatched_roots` contains requested root column indices whose nested
+    /// paths match no leaf columns in the current parquet schema. These roots
+    /// are still part of the logical projection, but they are absent from the
+    /// physical batch returned by parquet decoding.
+    pub unmatched_roots: Vec<usize>,
+}
+
+/// Builds a projection mask plan for reading a parquet file.
+///
+/// `parquet_read_cols` defines the requested root columns and optional nested
+/// paths to read.
+///
+/// `parquet_schema_desc` is the schema descriptor of the current parquet file.
+/// It is used to resolve requested nested paths to actual leaf column indices.
+///
+/// See [`ProjectionMaskPlan`] for the returned value.
+///
+/// For example, if the query requests `j.a` and `k`, but the current parquet
+/// file only contains leaves under `j.b` and `k`, then the returned plan keeps
+/// `k` in the projection mask and records `j` in `unmatched_roots`.
 pub fn build_projection_mask(
     parquet_read_cols: &ParquetReadColumns,
     parquet_schema_desc: &SchemaDescriptor,
-) -> ProjectionMask {
-    if parquet_read_cols.has_nested() {
-        let leaf_indices = build_parquet_leaves_indices(parquet_schema_desc, parquet_read_cols);
-        ProjectionMask::leaves(parquet_schema_desc, leaf_indices)
-    } else {
-        ProjectionMask::roots(parquet_schema_desc, parquet_read_cols.root_indices_iter())
+) -> ProjectionMaskPlan {
+    if !parquet_read_cols.has_nested() {
+        let mask =
+            ProjectionMask::roots(parquet_schema_desc, parquet_read_cols.root_indices_iter());
+        return ProjectionMaskPlan {
+            mask,
+            unmatched_roots: vec![],
+        };
+    }
+
+    let (leaf_indices, matched_roots) =
+        build_parquet_leaves_indices(parquet_schema_desc, parquet_read_cols);
+
+    let unmatched_roots = parquet_read_cols
+        .columns()
+        .iter()
+        .filter(|col| !col.nested_paths().is_empty() && !matched_roots.contains(&col.root_index()))
+        .map(|col| col.root_index())
+        .collect();
+
+    let mask = ProjectionMask::leaves(parquet_schema_desc, leaf_indices);
+    ProjectionMaskPlan {
+        mask,
+        unmatched_roots,
     }
 }
 
-/// Builds parquet leaf-column indices from parquet read columns.
+/// Builds parquet leaf-column indices for reading a parquet file.
+///
+/// Returns `(leaf_indices, matched_roots)`:
+/// - `leaf_indices`: matched parquet leaf column indices
+/// - `matched_roots`: root column indices that match at least one leaf
 fn build_parquet_leaves_indices(
     parquet_schema_desc: &SchemaDescriptor,
     projection: &ParquetReadColumns,
-) -> Vec<usize> {
+) -> (Vec<usize>, Vec<usize>) {
     let mut map = HashMap::with_capacity(projection.cols.len());
     for col in &projection.cols {
         map.insert(col.root_index, &col.nested_paths);
     }
 
     let mut leaf_indices = Vec::new();
+    let mut matched_roots = Vec::new();
     for (leaf_idx, leaf_col) in parquet_schema_desc.columns().iter().enumerate() {
         let root_idx = parquet_schema_desc.get_column_root_idx(leaf_idx);
         let Some(nested_paths) = map.get(&root_idx) else {
@@ -135,6 +181,9 @@ fn build_parquet_leaves_indices(
         };
         if nested_paths.is_empty() {
             leaf_indices.push(leaf_idx);
+            if !matched_roots.contains(&root_idx) {
+                matched_roots.push(root_idx);
+            }
             continue;
         }
 
@@ -144,9 +193,12 @@ fn build_parquet_leaves_indices(
             .any(|nested_path| leaf_path.starts_with(nested_path))
         {
             leaf_indices.push(leaf_idx);
+            if !matched_roots.contains(&root_idx) {
+                matched_roots.push(root_idx);
+            }
         }
     }
-    leaf_indices
+    (leaf_indices, matched_roots)
 }
 
 #[cfg(test)]
@@ -157,6 +209,20 @@ mod tests {
     use parquet::schema::types::Type;
 
     use super::*;
+
+    #[test]
+    fn test_build_projection_mask_without_nested_paths() {
+        let parquet_schema_desc = build_test_nested_parquet_schema();
+        let projection = ParquetReadColumns::from_deduped_root_indices([0, 1]);
+
+        let plan = build_projection_mask(&projection, &parquet_schema_desc);
+
+        assert!(plan.unmatched_roots.is_empty());
+        assert_eq!(
+            ProjectionMask::roots(&parquet_schema_desc, [0, 1]),
+            plan.mask
+        );
+    }
 
     #[test]
     fn test_reads_whole_root() {
@@ -170,10 +236,10 @@ mod tests {
             has_nested: false,
         };
 
-        assert_eq!(
-            vec![0, 1, 2],
-            build_parquet_leaves_indices(&parquet_schema_desc, &projection)
-        );
+        let (leaf_indices, matched_roots) =
+            build_parquet_leaves_indices(&parquet_schema_desc, &projection);
+        assert_eq!(vec![0, 1, 2], leaf_indices);
+        assert_eq!(vec![0], matched_roots);
     }
 
     #[test]
@@ -194,10 +260,10 @@ mod tests {
             has_nested: true,
         };
 
-        assert_eq!(
-            vec![1, 2, 3],
-            build_parquet_leaves_indices(&parquet_schema_desc, &projection)
-        );
+        let (leaf_indices, matched_roots) =
+            build_parquet_leaves_indices(&parquet_schema_desc, &projection);
+        assert_eq!(vec![1, 2, 3], leaf_indices);
+        assert_eq!(vec![0, 1], matched_roots);
     }
 
     #[test]
@@ -212,10 +278,10 @@ mod tests {
             has_nested: true,
         };
 
-        assert_eq!(
-            vec![1, 2],
-            build_parquet_leaves_indices(&parquet_schema_desc, &projection)
-        );
+        let (leaf_indices, matched_roots) =
+            build_parquet_leaves_indices(&parquet_schema_desc, &projection);
+        assert_eq!(vec![1, 2], leaf_indices);
+        assert_eq!(vec![0], matched_roots);
     }
 
     #[test]
@@ -230,9 +296,36 @@ mod tests {
             has_nested: true,
         };
 
+        let (leaf_indices, matched_roots) =
+            build_parquet_leaves_indices(&parquet_schema_desc, &projection);
+        assert_eq!(vec![1], leaf_indices);
+        assert_eq!(vec![0], matched_roots);
+    }
+
+    #[test]
+    fn test_build_projection_mask_with_unmatched_roots() {
+        let parquet_schema_desc = build_test_nested_parquet_schema();
+
+        let projection = ParquetReadColumns {
+            cols: vec![
+                ParquetReadColumn {
+                    root_index: 0,
+                    nested_paths: vec![vec!["j".to_string(), "missing".to_string()]],
+                },
+                ParquetReadColumn {
+                    root_index: 1,
+                    nested_paths: vec![],
+                },
+            ],
+            has_nested: true,
+        };
+
+        let plan = build_projection_mask(&projection, &parquet_schema_desc);
+
+        assert_eq!(vec![0], plan.unmatched_roots);
         assert_eq!(
-            vec![1],
-            build_parquet_leaves_indices(&parquet_schema_desc, &projection)
+            ProjectionMask::leaves(&parquet_schema_desc, vec![3]),
+            plan.mask
         );
     }
 
@@ -251,10 +344,10 @@ mod tests {
             has_nested: true,
         };
 
-        assert_eq!(
-            vec![0, 2],
-            build_parquet_leaves_indices(&parquet_schema_desc, &projection)
-        );
+        let (leaf_indices, matched_roots) =
+            build_parquet_leaves_indices(&parquet_schema_desc, &projection);
+        assert_eq!(vec![0, 2], leaf_indices);
+        assert_eq!(vec![0], matched_roots);
     }
 
     // Test schema:
