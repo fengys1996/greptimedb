@@ -73,6 +73,7 @@ use crate::sst::parquet::async_reader::SstAsyncFileReader;
 use crate::sst::parquet::file_range::{
     FileRangeContext, FileRangeContextRef, PartitionFilterContext, PreFilterMode, RangeBase,
 };
+use crate::sst::parquet::flat_format::sst_column_index_ids;
 use crate::sst::parquet::format::{ReadFormat, need_override_sequence};
 use crate::sst::parquet::metadata::MetadataLoader;
 use crate::sst::parquet::prefilter::{
@@ -410,7 +411,14 @@ impl ParquetReaderBuilder {
             read_format.projection_indices().iter().copied(),
         );
 
-        let projection_mask = build_projection_mask(&parquet_read_cols, parquet_schema_desc).mask;
+        let projection_mask = build_projection_mask(&parquet_read_cols, parquet_schema_desc);
+        let idx_to_col_id = sst_column_index_ids(&region_meta);
+        let missing_col_ids: HashSet<_> = projection_mask
+            .unmatched_roots
+            .iter()
+            .filter_map(|root_idx| idx_to_col_id.get(root_idx))
+            .copied()
+            .collect();
         let selection = self
             .row_groups_to_read(&read_format, &parquet_meta, &mut metrics.filter_metrics)
             .await;
@@ -495,7 +503,7 @@ impl ParquetReaderBuilder {
             parquet_meta,
             arrow_metadata,
             object_store: self.object_store.clone(),
-            projection: projection_mask,
+            projection: projection_mask.mask,
             cache_strategy: self.cache_strategy.clone(),
             prefilter_builder,
         };
@@ -512,6 +520,7 @@ impl ParquetReaderBuilder {
                 prune_schema,
                 codec,
                 compat_batch: None,
+                missing_col_ids,
                 compaction_projection_mapper,
                 pre_filter_mode: self.pre_filter_mode,
                 partition_filter,

@@ -1125,6 +1125,7 @@ impl ScanInput {
                     mapper,
                     flat_format.metadata(),
                     flat_format.format_projection(),
+                    file_range_ctx.missing_col_ids(),
                     self.compaction,
                 )?
                 .map(CompatBatch::Flat)

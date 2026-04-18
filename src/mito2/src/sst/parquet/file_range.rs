@@ -15,7 +15,7 @@
 //! Structs and functions for reading ranges from a parquet file. A file range
 //! is usually a row group in a parquet file.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::BitAnd;
 use std::sync::Arc;
 
@@ -357,6 +357,10 @@ impl FileRangeContext {
         self.base.compat_batch.as_ref()
     }
 
+    pub(crate) fn missing_col_ids(&self) -> &HashSet<ColumnId> {
+        &self.base.missing_col_ids
+    }
+
     /// Returns the helper to project batches.
     pub(crate) fn compaction_projection_mapper(&self) -> Option<&CompactionProjectionMapper> {
         self.base.compaction_projection_mapper.as_ref()
@@ -460,6 +464,9 @@ pub(crate) struct RangeBase {
     pub(crate) codec: Arc<dyn PrimaryKeyCodec>,
     /// Optional helper to compat batches.
     pub(crate) compat_batch: Option<CompatBatch>,
+    /// Column ids that are logically projected but absent from the physical
+    /// parquet batch after nested leaf projection.
+    pub(crate) missing_col_ids: HashSet<ColumnId>,
     /// Optional helper to project batches.
     pub(crate) compaction_projection_mapper: Option<CompactionProjectionMapper>,
     /// Mode to pre-filter columns.
@@ -979,6 +986,7 @@ mod tests {
             prune_schema: metadata.schema.clone(),
             codec: mito_codec::row_converter::build_primary_key_codec(metadata.as_ref()),
             compat_batch: None,
+            missing_col_ids: HashSet::new(),
             compaction_projection_mapper: None,
             pre_filter_mode: PreFilterMode::All,
             partition_filter: None,

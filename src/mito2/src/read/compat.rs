@@ -14,7 +14,7 @@
 
 //! Utilities to adapt readers with different schema.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use api::v1::SemanticType;
@@ -203,15 +203,22 @@ impl FlatCompatBatch {
     /// - `mapper` is built from the metadata users expect to see.
     /// - `actual` is the [RegionMetadata] of the input parquet.
     /// - `format_projection` is the projection of the read format for the input parquet.
+    /// - `missing_col_ids` are projected column ids missing from the physical parquet batch.
     /// - `compaction` indicates whether the reader is for compaction.
     pub(crate) fn try_new(
         mapper: &FlatProjectionMapper,
         actual: &RegionMetadataRef,
         format_projection: &FormatProjection,
+        missing_col_ids: &HashSet<ColumnId>,
         compaction: bool,
     ) -> Result<Option<Self>> {
         let actual_schema = flat_projected_columns(actual, format_projection);
+        let actual_schema: Vec<_> = actual_schema
+            .into_iter()
+            .filter(|(col_id, _)| !missing_col_ids.contains(col_id))
+            .collect();
         let expect_schema = mapper.batch_schema();
+
         if expect_schema == actual_schema {
             // Although the SST has a different schema, but the schema after projection is the same
             // as expected schema.
@@ -1224,10 +1231,15 @@ mod tests {
         .unwrap();
         let format_projection = read_format.format_projection();
 
-        let compat_batch =
-            FlatCompatBatch::try_new(&mapper, &actual_metadata, format_projection, false)
-                .unwrap()
-                .unwrap();
+        let compat_batch = FlatCompatBatch::try_new(
+            &mapper,
+            &actual_metadata,
+            format_projection,
+            &HashSet::new(),
+            false,
+        )
+        .unwrap()
+        .unwrap();
 
         let mut tag_builder = StringDictionaryBuilder::<UInt32Type>::new();
         tag_builder.append_value("tag1");
@@ -1319,10 +1331,15 @@ mod tests {
         .unwrap();
         let format_projection = read_format.format_projection();
 
-        let compat_batch =
-            FlatCompatBatch::try_new(&mapper, &actual_metadata, format_projection, false)
-                .unwrap()
-                .unwrap();
+        let compat_batch = FlatCompatBatch::try_new(
+            &mapper,
+            &actual_metadata,
+            format_projection,
+            &HashSet::new(),
+            false,
+        )
+        .unwrap()
+        .unwrap();
 
         let mut tag_builder = StringDictionaryBuilder::<UInt32Type>::new();
         tag_builder.append_value("tag1");
@@ -1410,10 +1427,15 @@ mod tests {
         .unwrap();
         let format_projection = read_format.format_projection();
 
-        let compat_batch =
-            FlatCompatBatch::try_new(&mapper, &actual_metadata, format_projection, false)
-                .unwrap()
-                .unwrap();
+        let compat_batch = FlatCompatBatch::try_new(
+            &mapper,
+            &actual_metadata,
+            format_projection,
+            &HashSet::new(),
+            false,
+        )
+        .unwrap()
+        .unwrap();
 
         // Tag array.
         let mut tag1_builder = StringDictionaryBuilder::<UInt32Type>::new();
@@ -1504,10 +1526,15 @@ mod tests {
         .unwrap();
         let format_projection = read_format.format_projection();
 
-        let compat_batch =
-            FlatCompatBatch::try_new(&mapper, &actual_metadata, format_projection, true)
-                .unwrap()
-                .unwrap();
+        let compat_batch = FlatCompatBatch::try_new(
+            &mapper,
+            &actual_metadata,
+            format_projection,
+            &HashSet::new(),
+            true,
+        )
+        .unwrap()
+        .unwrap();
 
         let sparse_k1 = encode_sparse_key(&[]);
         let input_columns: Vec<ArrayRef> = vec![

@@ -564,6 +564,29 @@ pub(crate) fn sst_column_id_indices(metadata: &RegionMetadata) -> HashMap<Column
     id_to_index
 }
 
+/// Returns a map that the key is the column position in the SST and the value
+/// is the column id.
+pub(crate) fn sst_column_index_ids(metadata: &RegionMetadata) -> HashMap<usize, ColumnId> {
+    let mut index_to_id = HashMap::with_capacity(metadata.column_metadatas.len());
+    let mut column_index = 0;
+    // keys
+    for pk_id in &metadata.primary_key {
+        index_to_id.insert(column_index, *pk_id);
+        column_index += 1;
+    }
+    // fields
+    for column in &metadata.column_metadatas {
+        if column.semantic_type == SemanticType::Field {
+            index_to_id.insert(column_index, column.column_id);
+            column_index += 1;
+        }
+    }
+    // time index
+    index_to_id.insert(column_index, metadata.time_index_column().column_id);
+
+    index_to_id
+}
+
 /// Decodes primary keys from a batch and returns decoded primary key information.
 ///
 /// The batch must contain a primary key column at the expected index.
