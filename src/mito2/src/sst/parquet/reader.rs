@@ -73,7 +73,7 @@ use crate::sst::parquet::async_reader::SstAsyncFileReader;
 use crate::sst::parquet::file_range::{
     FileRangeContext, FileRangeContextRef, PartitionFilterContext, PreFilterMode, RangeBase,
 };
-use crate::sst::parquet::flat_format::sst_column_index_ids;
+use crate::sst::parquet::flat_format::sst_column_ids;
 use crate::sst::parquet::format::{ReadFormat, need_override_sequence};
 use crate::sst::parquet::metadata::MetadataLoader;
 use crate::sst::parquet::prefilter::{
@@ -412,11 +412,11 @@ impl ParquetReaderBuilder {
         );
 
         let projection_mask = build_projection_mask(&parquet_read_cols, parquet_schema_desc);
-        let idx_to_col_id = sst_column_index_ids(&region_meta);
+        let col_ids = sst_column_ids(&region_meta);
         let missing_col_ids: HashSet<_> = projection_mask
             .unmatched_roots
             .iter()
-            .filter_map(|root_idx| idx_to_col_id.get(root_idx))
+            .filter_map(|root_idx| col_ids.get(*root_idx))
             .copied()
             .collect();
         let selection = self

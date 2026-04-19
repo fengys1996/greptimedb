@@ -357,6 +357,7 @@ impl FileRangeContext {
         self.base.compat_batch.as_ref()
     }
 
+    // TODO: add docs for this method.
     pub(crate) fn missing_col_ids(&self) -> &HashSet<ColumnId> {
         &self.base.missing_col_ids
     }
@@ -464,8 +465,12 @@ pub(crate) struct RangeBase {
     pub(crate) codec: Arc<dyn PrimaryKeyCodec>,
     /// Optional helper to compat batches.
     pub(crate) compat_batch: Option<CompatBatch>,
-    /// Column ids that are logically projected but absent from the physical
-    /// parquet batch after nested leaf projection.
+    /// Column ids that are logically requested by the projection but absent
+    /// from the physical parquet batch of the current file.
+    ///
+    /// This happens when a nested projection requests a root column, but no
+    /// leaf under that root matches in the current parquet schema, for example
+    /// when querying a newly added nested field from an older SST.
     pub(crate) missing_col_ids: HashSet<ColumnId>,
     /// Optional helper to project batches.
     pub(crate) compaction_projection_mapper: Option<CompactionProjectionMapper>,

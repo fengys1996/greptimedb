@@ -198,13 +198,16 @@ pub(crate) struct FlatCompatBatch {
 }
 
 impl FlatCompatBatch {
-    /// Creates a [FlatCompatBatch].
+    /// Creates a [`FlatCompatBatch`].
     ///
     /// - `mapper` is built from the metadata users expect to see.
-    /// - `actual` is the [RegionMetadata] of the input parquet.
+    /// - `actual` is the [`RegionMetadata`] of the input parquet.
     /// - `format_projection` is the projection of the read format for the input parquet.
-    /// - `missing_col_ids` are projected column ids missing from the physical parquet batch.
     /// - `compaction` indicates whether the reader is for compaction.
+    ///
+    /// `missing_col_ids` are columns that should be treated as missing during
+    /// compat. See [`crate::sst::parquet::file_range::RangeBase::missing_col_ids`]
+    /// for details.
     pub(crate) fn try_new(
         mapper: &FlatProjectionMapper,
         actual: &RegionMetadataRef,
