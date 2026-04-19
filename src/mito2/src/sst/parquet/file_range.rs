@@ -357,7 +357,6 @@ impl FileRangeContext {
         self.base.compat_batch.as_ref()
     }
 
-    // TODO: add docs for this method.
     pub(crate) fn missing_col_ids(&self) -> &HashSet<ColumnId> {
         &self.base.missing_col_ids
     }

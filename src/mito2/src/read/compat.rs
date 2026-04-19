@@ -216,6 +216,9 @@ impl FlatCompatBatch {
         compaction: bool,
     ) -> Result<Option<Self>> {
         let actual_schema = flat_projected_columns(actual, format_projection);
+        // The actual schema does not include the missing columns, so we remove
+        // them from the schema and align the data by filling in null or default
+        // values.
         let actual_schema: Vec<_> = actual_schema
             .into_iter()
             .filter(|(col_id, _)| !missing_col_ids.contains(col_id))

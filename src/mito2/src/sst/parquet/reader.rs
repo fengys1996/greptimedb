@@ -79,7 +79,9 @@ use crate::sst::parquet::metadata::MetadataLoader;
 use crate::sst::parquet::prefilter::{
     PrefilterContextBuilder, execute_prefilter, is_usable_primary_key_filter,
 };
-use crate::sst::parquet::read_columns::{ParquetReadColumns, build_projection_mask};
+use crate::sst::parquet::read_columns::{
+    ParquetReadColumns, ProjectionMaskPlan, build_projection_mask,
+};
 use crate::sst::parquet::row_group::ParquetFetchMetrics;
 use crate::sst::parquet::row_selection::RowGroupSelection;
 use crate::sst::parquet::stats::RowGroupPruningStats;
@@ -411,14 +413,22 @@ impl ParquetReaderBuilder {
             read_format.projection_indices().iter().copied(),
         );
 
-        let projection_mask = build_projection_mask(&parquet_read_cols, parquet_schema_desc);
-        let col_ids = sst_column_ids(&region_meta);
-        let missing_col_ids: HashSet<_> = projection_mask
-            .unmatched_roots
-            .iter()
-            .filter_map(|root_idx| col_ids.get(*root_idx))
-            .copied()
-            .collect();
+        let ProjectionMaskPlan {
+            mask,
+            unmatched_roots,
+        } = build_projection_mask(&parquet_read_cols, parquet_schema_desc);
+
+        let missing_col_ids = if unmatched_roots.is_empty() {
+            HashSet::new()
+        } else {
+            let col_ids = sst_column_ids(&region_meta);
+            unmatched_roots
+                .iter()
+                .filter_map(|root_idx| col_ids.get(*root_idx))
+                .copied()
+                .collect()
+        };
+
         let selection = self
             .row_groups_to_read(&read_format, &parquet_meta, &mut metrics.filter_metrics)
             .await;
@@ -503,7 +513,7 @@ impl ParquetReaderBuilder {
             parquet_meta,
             arrow_metadata,
             object_store: self.object_store.clone(),
-            projection: projection_mask.mask,
+            projection: mask,
             cache_strategy: self.cache_strategy.clone(),
             prefilter_builder,
         };
