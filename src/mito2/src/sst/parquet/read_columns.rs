@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use parquet::arrow::ProjectionMask;
 use parquet::schema::types::SchemaDescriptor;
@@ -166,14 +166,14 @@ pub fn build_projection_mask(
 fn build_parquet_leaves_indices(
     parquet_schema_desc: &SchemaDescriptor,
     projection: &ParquetReadColumns,
-) -> (Vec<usize>, Vec<usize>) {
+) -> (Vec<usize>, HashSet<usize>) {
     let mut map = HashMap::with_capacity(projection.cols.len());
     for col in &projection.cols {
         map.insert(col.root_index, &col.nested_paths);
     }
 
     let mut leaf_indices = Vec::new();
-    let mut matched_roots = Vec::new();
+    let mut matched_roots = HashSet::with_capacity(projection.cols.len());
     for (leaf_idx, leaf_col) in parquet_schema_desc.columns().iter().enumerate() {
         let root_idx = parquet_schema_desc.get_column_root_idx(leaf_idx);
         let Some(nested_paths) = map.get(&root_idx) else {
@@ -181,9 +181,7 @@ fn build_parquet_leaves_indices(
         };
         if nested_paths.is_empty() {
             leaf_indices.push(leaf_idx);
-            if !matched_roots.contains(&root_idx) {
-                matched_roots.push(root_idx);
-            }
+            matched_roots.insert(root_idx);
             continue;
         }
 
@@ -193,9 +191,7 @@ fn build_parquet_leaves_indices(
             .any(|nested_path| leaf_path.starts_with(nested_path))
         {
             leaf_indices.push(leaf_idx);
-            if !matched_roots.contains(&root_idx) {
-                matched_roots.push(root_idx);
-            }
+            matched_roots.insert(root_idx);
         }
     }
     (leaf_indices, matched_roots)
@@ -239,7 +235,7 @@ mod tests {
         let (leaf_indices, matched_roots) =
             build_parquet_leaves_indices(&parquet_schema_desc, &projection);
         assert_eq!(vec![0, 1, 2], leaf_indices);
-        assert_eq!(vec![0], matched_roots);
+        assert_eq!(HashSet::from([0]), matched_roots);
     }
 
     #[test]
@@ -263,7 +259,7 @@ mod tests {
         let (leaf_indices, matched_roots) =
             build_parquet_leaves_indices(&parquet_schema_desc, &projection);
         assert_eq!(vec![1, 2, 3], leaf_indices);
-        assert_eq!(vec![0, 1], matched_roots);
+        assert_eq!(HashSet::from([0, 1]), matched_roots);
     }
 
     #[test]
@@ -281,7 +277,7 @@ mod tests {
         let (leaf_indices, matched_roots) =
             build_parquet_leaves_indices(&parquet_schema_desc, &projection);
         assert_eq!(vec![1, 2], leaf_indices);
-        assert_eq!(vec![0], matched_roots);
+        assert_eq!(HashSet::from([0]), matched_roots);
     }
 
     #[test]
@@ -299,7 +295,7 @@ mod tests {
         let (leaf_indices, matched_roots) =
             build_parquet_leaves_indices(&parquet_schema_desc, &projection);
         assert_eq!(vec![1], leaf_indices);
-        assert_eq!(vec![0], matched_roots);
+        assert_eq!(HashSet::from([0]), matched_roots);
     }
 
     #[test]
@@ -347,7 +343,7 @@ mod tests {
         let (leaf_indices, matched_roots) =
             build_parquet_leaves_indices(&parquet_schema_desc, &projection);
         assert_eq!(vec![0, 2], leaf_indices);
-        assert_eq!(vec![0], matched_roots);
+        assert_eq!(HashSet::from([0]), matched_roots);
     }
 
     // Test schema:

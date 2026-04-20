@@ -205,23 +205,24 @@ impl FlatCompatBatch {
     /// - `format_projection` is the projection of the read format for the input parquet.
     /// - `compaction` indicates whether the reader is for compaction.
     ///
-    /// `missing_col_ids` are columns that should be treated as missing during
-    /// compat. See [`crate::sst::parquet::file_range::RangeBase::missing_col_ids`]
+    /// `missing_projected_col_ids` are projected columns that should be treated
+    /// as missing during compat. See
+    /// [`crate::sst::parquet::file_range::RangeBase::missing_projected_col_ids`]
     /// for details.
     pub(crate) fn try_new(
         mapper: &FlatProjectionMapper,
         actual: &RegionMetadataRef,
         format_projection: &FormatProjection,
-        missing_col_ids: &HashSet<ColumnId>,
+        missing_projected_col_ids: &HashSet<ColumnId>,
         compaction: bool,
     ) -> Result<Option<Self>> {
-        let actual_schema = flat_projected_columns(actual, format_projection);
+        let projected_schema = flat_projected_columns(actual, format_projection);
         // The actual schema does not include the missing columns, so we remove
         // them from the schema and align the data by filling in null or default
         // values.
-        let actual_schema: Vec<_> = actual_schema
+        let actual_schema: Vec<_> = projected_schema
             .into_iter()
-            .filter(|(col_id, _)| !missing_col_ids.contains(col_id))
+            .filter(|(col_id, _)| !missing_projected_col_ids.contains(col_id))
             .collect();
         let expect_schema = mapper.batch_schema();
 
@@ -993,6 +994,7 @@ mod tests {
     use datatypes::arrow::record_batch::RecordBatch;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
+    use datatypes::types::{StructField, StructType};
     use datatypes::value::ValueRef;
     use mito_codec::row_converter::{
         DensePrimaryKeyCodec, PrimaryKeyCodecExt, SparsePrimaryKeyCodec,
@@ -1376,6 +1378,118 @@ mod tests {
             tag_dict_array.clone(),
             Arc::new(Int64Array::from(vec![100, 200])),
             Arc::new(Int64Array::from(vec![None::<i64>, None::<i64>])),
+            Arc::new(TimestampMillisecondArray::from_iter_values([1000, 2000])),
+            build_flat_test_pk_array(&[&k1, &k1]),
+            Arc::new(UInt64Array::from_iter_values([1, 2])),
+            Arc::new(UInt8Array::from_iter_values([
+                OpType::Put as u8,
+                OpType::Put as u8,
+            ])),
+        ];
+        let expected_batch = RecordBatch::try_new(expected_schema, expected_columns).unwrap();
+
+        assert_eq!(expected_batch, result);
+    }
+
+    #[test]
+    fn test_flat_compat_batch_with_missing_columns_on_nested_projection() {
+        let nested_field_type = ConcreteDataType::struct_datatype(StructType::new(Arc::new(vec![
+            StructField::new("c".to_string(), ConcreteDataType::int64_datatype(), true),
+            StructField::new("d".to_string(), ConcreteDataType::int64_datatype(), true),
+        ])));
+
+        // The logical read schema still contains column 3. A nested projection on
+        // an older SST can still require this column to be present in the output.
+        let actual_metadata = Arc::new(new_metadata(
+            &[
+                (
+                    0,
+                    SemanticType::Timestamp,
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                ),
+                (1, SemanticType::Tag, ConcreteDataType::string_datatype()),
+                (2, SemanticType::Field, ConcreteDataType::int64_datatype()),
+                (3, SemanticType::Field, nested_field_type),
+            ],
+            &[1],
+        ));
+        // The physical batch omits column 3 because the source SST doesn't carry
+        // the projected nested field.
+        let physical_metadata = Arc::new(new_metadata(
+            &[
+                (
+                    0,
+                    SemanticType::Timestamp,
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                ),
+                (1, SemanticType::Tag, ConcreteDataType::string_datatype()),
+                (2, SemanticType::Field, ConcreteDataType::int64_datatype()),
+            ],
+            &[1],
+        ));
+
+        let mapper = FlatProjectionMapper::all(&actual_metadata).unwrap();
+        let read_format = FlatReadFormat::new(
+            actual_metadata.clone(),
+            [0, 1, 2, 3].into_iter(),
+            None,
+            "test",
+            false,
+        )
+        .unwrap();
+        let format_projection = read_format.format_projection();
+
+        // `missing_projected_col_ids` tells compat to treat column 3 as
+        // logically projected but physically absent, so it must be filled with
+        // default/null values.
+        let compat_batch = FlatCompatBatch::try_new(
+            &mapper,
+            &actual_metadata,
+            format_projection,
+            &HashSet::from([3]),
+            false,
+        )
+        .unwrap()
+        .unwrap();
+
+        let mut tag_builder = StringDictionaryBuilder::<UInt32Type>::new();
+        tag_builder.append_value("tag1");
+        tag_builder.append_value("tag1");
+        let tag_dict_array = Arc::new(tag_builder.finish());
+
+        let k1 = encode_key(&[Some("tag1")]);
+        let input_columns: Vec<ArrayRef> = vec![
+            tag_dict_array.clone(),
+            Arc::new(Int64Array::from(vec![100, 200])),
+            Arc::new(TimestampMillisecondArray::from_iter_values([1000, 2000])),
+            build_flat_test_pk_array(&[&k1, &k1]),
+            Arc::new(UInt64Array::from_iter_values([1, 2])),
+            Arc::new(UInt8Array::from_iter_values([
+                OpType::Put as u8,
+                OpType::Put as u8,
+            ])),
+        ];
+        let input_schema =
+            to_flat_sst_arrow_schema(&physical_metadata, &FlatSchemaOptions::default());
+        let input_batch = RecordBatch::try_new(input_schema, input_columns).unwrap();
+
+        let result = compat_batch.compat(input_batch).unwrap();
+
+        // The compat batch should restore column 3 in its logical position while
+        // keeping the internal columns appended at the end.
+        let default_vector = actual_metadata
+            .column_by_id(3)
+            .unwrap()
+            .column_schema
+            .create_default_vector(1)
+            .unwrap()
+            .unwrap();
+        let expected_schema =
+            to_flat_sst_arrow_schema(&actual_metadata, &FlatSchemaOptions::default());
+        let expected_columns: Vec<ArrayRef> = vec![
+            tag_dict_array,
+            Arc::new(Int64Array::from(vec![100, 200])),
+            repeat_vector(&default_vector, 2, false).unwrap(),
             Arc::new(TimestampMillisecondArray::from_iter_values([1000, 2000])),
             build_flat_test_pk_array(&[&k1, &k1]),
             Arc::new(UInt64Array::from_iter_values([1, 2])),

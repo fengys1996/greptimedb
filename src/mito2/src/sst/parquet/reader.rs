@@ -418,7 +418,7 @@ impl ParquetReaderBuilder {
             unmatched_roots,
         } = build_projection_mask(&parquet_read_cols, parquet_schema_desc);
 
-        let missing_col_ids = if unmatched_roots.is_empty() {
+        let missing_projected_col_ids = if unmatched_roots.is_empty() {
             HashSet::new()
         } else {
             let col_ids = sst_column_ids(&region_meta);
@@ -530,7 +530,7 @@ impl ParquetReaderBuilder {
                 prune_schema,
                 codec,
                 compat_batch: None,
-                missing_col_ids,
+                missing_projected_col_ids,
                 compaction_projection_mapper,
                 pre_filter_mode: self.pre_filter_mode,
                 partition_filter,

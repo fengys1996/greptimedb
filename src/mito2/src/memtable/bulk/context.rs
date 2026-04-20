@@ -104,7 +104,7 @@ impl BulkIterContext {
                 codec,
                 // we don't need to compat batch since all batch in memtable have the same schema.
                 compat_batch: None,
-                missing_col_ids: HashSet::new(),
+                missing_projected_col_ids: HashSet::new(),
                 compaction_projection_mapper: None,
                 pre_filter_mode,
                 partition_filter: None,

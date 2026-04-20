@@ -357,8 +357,8 @@ impl FileRangeContext {
         self.base.compat_batch.as_ref()
     }
 
-    pub(crate) fn missing_col_ids(&self) -> &HashSet<ColumnId> {
-        &self.base.missing_col_ids
+    pub(crate) fn missing_projected_col_ids(&self) -> &HashSet<ColumnId> {
+        &self.base.missing_projected_col_ids
     }
 
     /// Returns the helper to project batches.
@@ -470,7 +470,7 @@ pub(crate) struct RangeBase {
     /// This happens when a nested projection requests a root column, but no
     /// leaf under that root matches in the current parquet schema, for example
     /// when querying a newly added nested field from an older SST.
-    pub(crate) missing_col_ids: HashSet<ColumnId>,
+    pub(crate) missing_projected_col_ids: HashSet<ColumnId>,
     /// Optional helper to project batches.
     pub(crate) compaction_projection_mapper: Option<CompactionProjectionMapper>,
     /// Mode to pre-filter columns.
@@ -990,7 +990,7 @@ mod tests {
             prune_schema: metadata.schema.clone(),
             codec: mito_codec::row_converter::build_primary_key_codec(metadata.as_ref()),
             compat_batch: None,
-            missing_col_ids: HashSet::new(),
+            missing_projected_col_ids: HashSet::new(),
             compaction_projection_mapper: None,
             pre_filter_mode: PreFilterMode::All,
             partition_filter: None,
