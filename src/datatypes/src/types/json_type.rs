@@ -314,6 +314,15 @@ fn merge(this: &JsonNativeType, that: &JsonNativeType) -> JsonNativeType {
             JsonNativeType::Object(merge_object(this, that))
         }
         (JsonNativeType::Null, x) | (x, JsonNativeType::Null) => x.clone(),
+
+        (JsonNativeType::Number(x), JsonNativeType::Number(y)) => {
+            JsonNativeType::Number(match (x, y) {
+                (x, y) if x == y => *x,
+                (JsonNumberType::F64, _) | (_, JsonNumberType::F64) => JsonNumberType::F64,
+                _ => JsonNumberType::I64,
+            })
+        }
+
         _ => JsonNativeType::Variant,
     }
 }

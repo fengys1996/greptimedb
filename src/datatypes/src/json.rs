@@ -743,7 +743,7 @@ where
 
 #[cfg(test)]
 mod tests {
-
+    use common_base::bytes::Bytes;
     use serde_json::json;
 
     use super::*;
@@ -1064,11 +1064,21 @@ mod tests {
     fn test_encode_json_array_mixed_types() {
         let json = json!([1, "hello", true, 3.15]);
         let settings = JsonStructureSettings::Structured(None);
-        let result = settings.encode_with_type(json, None);
-        assert_eq!(
-            result.unwrap_err().to_string(),
-            "Invalid JSON: all items in json array must have the same type"
-        );
+        let result = settings
+            .encode_with_type(json, None)
+            .unwrap()
+            .into_json_inner()
+            .unwrap();
+
+        if let Value::List(list_value) = result {
+            assert_eq!(list_value.items().len(), 4);
+            assert_eq!(
+                list_value.datatype(),
+                Arc::new(ConcreteDataType::binary_datatype())
+            );
+        } else {
+            panic!("Expected List value");
+        }
     }
 
     #[test]
@@ -1290,12 +1300,12 @@ mod tests {
     #[test]
     fn test_encode_json_array_with_item_type() {
         let json = json!([1, 2, 3]);
-        let item_type = Arc::new(ConcreteDataType::uint64_datatype());
+        let item_type = Arc::new(ConcreteDataType::int64_datatype());
         let settings = JsonStructureSettings::Structured(None);
         let result = settings
             .encode_with_type(
                 json,
-                Some(&JsonNativeType::Array(Box::new(JsonNativeType::u64()))),
+                Some(&JsonNativeType::Array(Box::new(JsonNativeType::i64()))),
             )
             .unwrap()
             .into_json_inner()
@@ -1303,9 +1313,9 @@ mod tests {
 
         if let Value::List(list_value) = result {
             assert_eq!(list_value.items().len(), 3);
-            assert_eq!(list_value.items()[0], Value::UInt64(1));
-            assert_eq!(list_value.items()[1], Value::UInt64(2));
-            assert_eq!(list_value.items()[2], Value::UInt64(3));
+            assert_eq!(list_value.items()[0], Value::Int64(1));
+            assert_eq!(list_value.items()[1], Value::Int64(2));
+            assert_eq!(list_value.items()[2], Value::Int64(3));
             assert_eq!(list_value.datatype(), item_type);
         } else {
             panic!("Expected List value");
@@ -2263,11 +2273,32 @@ mod tests {
             )])),
         );
 
-        let decoded_struct = settings.decode_struct(array_struct);
-        assert_eq!(
-            decoded_struct.unwrap_err().to_string(),
-            "Invalid JSON: all items in json array must have the same type"
-        );
+        let decoded_struct = settings.decode_struct(array_struct).unwrap();
+        let fields = decoded_struct.struct_type().fields();
+        let decoded_fields: Vec<&str> = fields.iter().map(|f| f.name()).collect();
+        assert!(decoded_fields.contains(&"value"));
+
+        if let Value::List(list_value) = &decoded_struct.items()[0] {
+            assert_eq!(list_value.items().len(), 4);
+            assert_eq!(
+                list_value.items()[0],
+                Value::Binary(Bytes::from("1".as_bytes()))
+            );
+            assert_eq!(
+                list_value.items()[1],
+                Value::Binary(Bytes::from(r#""hello""#.as_bytes()))
+            );
+            assert_eq!(
+                list_value.items()[2],
+                Value::Binary(Bytes::from("true".as_bytes()))
+            );
+            assert_eq!(
+                list_value.items()[3],
+                Value::Binary(Bytes::from("3.15".as_bytes()))
+            );
+        } else {
+            panic!("Expected array to be decoded as ListValue");
+        }
     }
 
     #[test]
