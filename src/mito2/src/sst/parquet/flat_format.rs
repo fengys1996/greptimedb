@@ -110,7 +110,7 @@ impl FlatWriteFormat {
             &self.arrow_schema,
             columns,
         )
-            .context(RecordBatchSnafu)?;
+        .context(RecordBatchSnafu)?;
         RecordBatch::try_new(batch.schema(), columns).context(NewRecordBatchSnafu)
     }
 }

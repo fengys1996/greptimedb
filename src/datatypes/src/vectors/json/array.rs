@@ -84,7 +84,7 @@ impl JsonArray<'_> {
                 return UnsupportedArrowTypeSnafu {
                     arrow_type: other.clone(),
                 }
-                    .fail();
+                .fail();
             }
         };
         common_telemetry::debug!("after serialize: {:?}", value);

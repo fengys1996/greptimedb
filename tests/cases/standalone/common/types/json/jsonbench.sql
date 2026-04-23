@@ -88,3 +88,5 @@ LIMIT 3;
 EXPLAIN
 SELECT date_part('hour', to_timestamp_micros(arrow_cast(data.time_us, 'Int64'))) as hour_of_day
 FROM bluesky;
+
+DROP TABLE bluesky;
