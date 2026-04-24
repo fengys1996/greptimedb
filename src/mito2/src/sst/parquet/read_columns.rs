@@ -146,7 +146,7 @@ impl ParquetReadColumn {
 }
 
 /// Projection plan built for a parquet file.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ProjectionMaskPlan {
     /// `mask` is the projection mask applied to the parquet reader.
     pub mask: ProjectionMask,

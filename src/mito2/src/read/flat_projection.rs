@@ -229,7 +229,12 @@ impl FlatProjectionMapper {
         json_concretized_schema: Option<ArrowSchemaRef>,
     ) -> datatypes::arrow::datatypes::SchemaRef {
         if !compaction {
-            self.input_arrow_schema.clone()
+            match json_concretized_schema {
+                Some(override_schema) => {
+                    apply_json_override_schema(self.input_arrow_schema.clone(), &override_schema)
+                }
+                None => self.input_arrow_schema.clone(),
+            }
         } else {
             // For compaction, we need to build a different schema from encoding.
             let mut options = FlatSchemaOptions::from_encoding(self.metadata.primary_key_encoding);
@@ -428,6 +433,36 @@ pub(crate) fn compute_input_arrow_schema(
     Arc::new(datatypes::arrow::datatypes::Schema::new(new_fields))
 }
 
+fn apply_json_override_schema(
+    input_schema: ArrowSchemaRef,
+    override_schema: &ArrowSchemaRef,
+) -> ArrowSchemaRef {
+    let mut changed = false;
+    let fields: Vec<_> = input_schema
+        .fields()
+        .iter()
+        .map(|field| {
+            if datatypes::extension::json::is_json_extension_type(field)
+                && let Some((_, override_field)) = override_schema.fields().find(field.name())
+            {
+                changed = true;
+                override_field.clone()
+            } else {
+                field.clone()
+            }
+        })
+        .collect();
+
+    if changed {
+        Arc::new(arrow_schema::Schema::new_with_metadata(
+            fields,
+            input_schema.metadata().clone(),
+        ))
+    } else {
+        input_schema
+    }
+}
+
 /// Helper to project compaction batches into flat format columns
 /// (fields + time index + __primary_key + __sequence + __op_type).
 pub(crate) struct CompactionProjectionMapper {
@@ -519,5 +554,61 @@ impl DfBatchAssembler {
             columns.push(vector);
         }
         RecordBatch::to_df_record_batch(self.output_arrow_schema_with_internal.clone(), columns)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use arrow_schema::extension::{EXTENSION_TYPE_NAME_KEY, ExtensionType};
+    use datatypes::arrow::datatypes::{DataType as ArrowDataType, Field};
+    use datatypes::extension::json::JsonExtensionType;
+
+    use super::apply_json_override_schema;
+
+    #[test]
+    fn test_apply_json_override_schema_replaces_json_field() {
+        let input_schema = Arc::new(arrow_schema::Schema::new(vec![
+            Arc::new(
+                Field::new(
+                    "data",
+                    ArrowDataType::Struct(Vec::<Arc<Field>>::new().into()),
+                    true,
+                )
+                .with_metadata(HashMap::from([(
+                    EXTENSION_TYPE_NAME_KEY.to_string(),
+                    JsonExtensionType::NAME.to_string(),
+                )])),
+            ),
+            Arc::new(Field::new("value", ArrowDataType::Int64, true)),
+        ]));
+        let override_schema = Arc::new(arrow_schema::Schema::new(vec![
+            Arc::new(Field::new(
+                "data",
+                ArrowDataType::Struct(
+                    vec![
+                        Arc::new(Field::new("year", ArrowDataType::Int64, true)),
+                        Arc::new(Field::new("month", ArrowDataType::Int64, true)),
+                        Arc::new(Field::new("day", ArrowDataType::Int64, true)),
+                    ]
+                    .into(),
+                ),
+                true,
+            )),
+            Arc::new(Field::new("value", ArrowDataType::Int64, true)),
+        ]));
+
+        let schema = apply_json_override_schema(input_schema, &override_schema);
+
+        let ArrowDataType::Struct(fields) = schema.field(0).data_type() else {
+            panic!("expected struct field");
+        };
+        assert_eq!(3, fields.len());
+        assert_eq!("year", fields[0].name());
+        assert_eq!("month", fields[1].name());
+        assert_eq!("day", fields[2].name());
+        assert_eq!(ArrowDataType::Int64, *schema.field(1).data_type());
     }
 }

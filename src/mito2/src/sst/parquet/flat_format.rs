@@ -33,12 +33,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::v1::SemanticType;
+use arrow_schema::SchemaRef as ArrowSchemaRef;
 use datatypes::arrow::array::{
     Array, ArrayRef, BinaryArray, DictionaryArray, UInt32Array, UInt64Array,
 };
 use datatypes::arrow::compute::kernels::take::take;
 use datatypes::arrow::datatypes::{Schema, SchemaRef};
 use datatypes::arrow::record_batch::RecordBatch;
+use datatypes::extension::json::is_json_extension_type;
 use datatypes::prelude::{ConcreteDataType, DataType};
 use mito_codec::row_converter::{CompositeValues, PrimaryKeyCodec, build_primary_key_codec};
 use parquet::file::metadata::RowGroupMetaData;
@@ -161,6 +163,8 @@ pub struct FlatReadFormat {
     override_sequence: Option<SequenceNumber>,
     /// Parquet format adapter.
     parquet_adapter: ParquetAdapter,
+    /// Query-driven target schema for concretized JSON2 columns.
+    output_schema_override: Option<ArrowSchemaRef>,
 }
 
 impl FlatReadFormat {
@@ -200,12 +204,18 @@ impl FlatReadFormat {
         Ok(FlatReadFormat {
             override_sequence: None,
             parquet_adapter,
+            output_schema_override: None,
         })
     }
 
     /// Sets the sequence number to override.
     pub(crate) fn set_override_sequence(&mut self, sequence: Option<SequenceNumber>) {
         self.override_sequence = sequence;
+    }
+
+    /// Sets query-driven target schema for concretized JSON2 columns.
+    pub(crate) fn set_output_schema_override(&mut self, schema: Option<ArrowSchemaRef>) {
+        self.output_schema_override = schema;
     }
 
     /// Index of a column in the projected batch by its column id.
@@ -270,7 +280,11 @@ impl FlatReadFormat {
             .arrow_schema()
             .project(projection)
             .context(ComputeArrowSnafu)?;
-        Ok(Arc::new(schema))
+        let schema = Arc::new(schema);
+        Ok(match &self.output_schema_override {
+            Some(override_schema) => apply_json_override_schema(schema, override_schema),
+            None => schema,
+        })
     }
 
     /// Gets the metadata of the SST.
@@ -398,6 +412,36 @@ impl FlatReadFormat {
 
             Ok(true)
         }
+    }
+}
+
+fn apply_json_override_schema(
+    input_schema: ArrowSchemaRef,
+    override_schema: &ArrowSchemaRef,
+) -> ArrowSchemaRef {
+    let mut changed = false;
+    let fields: Vec<_> = input_schema
+        .fields()
+        .iter()
+        .map(|field| {
+            if is_json_extension_type(field)
+                && let Some((_, override_field)) = override_schema.fields().find(field.name())
+            {
+                changed = true;
+                override_field.clone()
+            } else {
+                field.clone()
+            }
+        })
+        .collect();
+
+    if changed {
+        Arc::new(Schema::new_with_metadata(
+            fields,
+            input_schema.metadata().clone(),
+        ))
+    } else {
+        input_schema
     }
 }
 
@@ -801,16 +845,20 @@ impl FlatReadFormat {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::sync::Arc;
 
     use api::v1::SemanticType;
+    use arrow_schema::extension::{EXTENSION_TYPE_NAME_KEY, ExtensionType};
+    use datatypes::arrow::datatypes::{DataType as ArrowDataType, Field, Schema};
+    use datatypes::extension::json::JsonExtensionType;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
     use store_api::codec::PrimaryKeyEncoding;
     use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder};
     use store_api::storage::RegionId;
 
-    use super::{FlatReadFormat, field_column_start};
+    use super::{FlatReadFormat, apply_json_override_schema, field_column_start};
     use crate::read::read_columns::ReadColumns;
     use crate::sst::{
         FlatSchemaOptions, flat_sst_arrow_schema_column_num, to_flat_sst_arrow_schema,
@@ -887,6 +935,49 @@ mod tests {
                 "num_tags={num_tags}, num_fields={num_fields}, encoding={encoding:?}"
             );
         }
+    }
+
+    #[test]
+    fn test_apply_json_override_schema_replaces_json_field() {
+        let input_schema = Arc::new(Schema::new(vec![
+            Arc::new(
+                Field::new(
+                    "data",
+                    ArrowDataType::Struct(Vec::<Arc<Field>>::new().into()),
+                    true,
+                )
+                .with_metadata(HashMap::from([(
+                    EXTENSION_TYPE_NAME_KEY.to_string(),
+                    JsonExtensionType::NAME.to_string(),
+                )])),
+            ),
+            Arc::new(Field::new("ts", ArrowDataType::Int64, false)),
+        ]));
+        let override_schema = Arc::new(Schema::new(vec![
+            Arc::new(Field::new(
+                "data",
+                ArrowDataType::Struct(
+                    vec![
+                        Arc::new(Field::new("day", ArrowDataType::Int64, true)),
+                        Arc::new(Field::new("month", ArrowDataType::Int64, true)),
+                        Arc::new(Field::new("year", ArrowDataType::Int64, true)),
+                    ]
+                    .into(),
+                ),
+                true,
+            )),
+            Arc::new(Field::new("ts", ArrowDataType::Int64, false)),
+        ]));
+
+        let schema = apply_json_override_schema(input_schema, &override_schema);
+
+        let ArrowDataType::Struct(fields) = schema.field(0).data_type() else {
+            panic!("expected struct field");
+        };
+        assert_eq!(3, fields.len());
+        assert_eq!("day", fields[0].name());
+        assert_eq!("month", fields[1].name());
+        assert_eq!("year", fields[2].name());
     }
 
     #[test]

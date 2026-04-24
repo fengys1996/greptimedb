@@ -1195,6 +1195,7 @@ impl ScanInput {
         };
         let res = reader
             .expected_metadata(Some(self.mapper.metadata().clone()))
+            .json_concretized_schema(Some(self.mapper.output_schema().arrow_schema().clone()))
             .compaction(self.compaction)
             .pre_filter_mode(pre_filter_mode)
             .decode_primary_key_values(decode_pk_values)

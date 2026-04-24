@@ -23,8 +23,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use api::v1::SemanticType;
+use arrow_schema::SchemaRef as ArrowSchemaRef;
 use common_recordbatch::filter::SimpleFilterEvaluator;
-use common_telemetry::{tracing, warn};
+use common_telemetry::{info, tracing, warn};
 use datafusion_expr::Expr;
 use datatypes::arrow::array::ArrayRef;
 use datatypes::arrow::datatypes::{Field, SchemaRef};
@@ -145,6 +146,8 @@ pub struct ParquetReaderBuilder {
     /// This is usually the latest metadata of the region. The reader use
     /// it get the correct column id of a column by name.
     expected_metadata: Option<RegionMetadataRef>,
+    /// Query-driven target schema for concretized JSON2 columns.
+    json_concretized_schema: Option<ArrowSchemaRef>,
     /// Whether this reader is for compaction.
     compaction: bool,
     /// Mode to pre-filter columns.
@@ -178,6 +181,7 @@ impl ParquetReaderBuilder {
             #[cfg(feature = "vector_index")]
             vector_index_k: None,
             expected_metadata: None,
+            json_concretized_schema: None,
             compaction: false,
             pre_filter_mode: PreFilterMode::All,
             decode_primary_key_values: false,
@@ -255,6 +259,16 @@ impl ParquetReaderBuilder {
     #[must_use]
     pub fn expected_metadata(mut self, expected_metadata: Option<RegionMetadataRef>) -> Self {
         self.expected_metadata = expected_metadata;
+        self
+    }
+
+    /// Attaches query-driven target schema for concretized JSON2 columns.
+    #[must_use]
+    pub(crate) fn json_concretized_schema(
+        mut self,
+        json_concretized_schema: Option<ArrowSchemaRef>,
+    ) -> Self {
+        self.json_concretized_schema = json_concretized_schema;
         self
     }
 
@@ -393,6 +407,7 @@ impl ParquetReaderBuilder {
             &file_path,
             skip_auto_convert,
         )?;
+        read_format.set_output_schema_override(self.json_concretized_schema.clone());
         if need_override_sequence(&parquet_meta) {
             read_format
                 .set_override_sequence(self.file_handle.meta_ref().sequence.map(|x| x.get()));
@@ -402,6 +417,8 @@ impl ParquetReaderBuilder {
         let parquet_schema_desc = parquet_meta.file_metadata().schema_descr();
         let parquet_read_cols = read_format.parquet_read_columns();
         let projection_plan = build_projection_plan(parquet_read_cols, parquet_schema_desc);
+        // TODO(fys): remove it later. This code for debug.
+        info!("leafs: {:?}", projection_plan);
         let selection = self
             .row_groups_to_read(&read_format, &parquet_meta, &mut metrics.filter_metrics)
             .await;
