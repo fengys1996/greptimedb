@@ -25,7 +25,7 @@ use common_recordbatch::{
 };
 use common_telemetry::tracing::Span;
 use common_telemetry::tracing_context::TracingContext;
-use common_telemetry::warn;
+use common_telemetry::{info, warn};
 use datafusion::error::Result as DfResult;
 use datafusion::execution::context::TaskContext;
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
@@ -33,6 +33,7 @@ use datafusion::physical_plan::filter_pushdown::{
     ChildPushdownResult, FilterPushdownPhase, FilterPushdownPropagation, PushedDown,
 };
 use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricsSet};
+use datafusion::physical_plan::projection::ProjectionExec;
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties,
     RecordBatchStream as DfRecordBatchStream,
@@ -46,16 +47,24 @@ use datatypes::compute::SortOptions;
 use futures::{Stream, StreamExt};
 use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
 use store_api::region_engine::{
-    PartitionRange, PrepareRequest, QueryScanContext, RegionScannerRef,
+    PartitionRange, PrepareRequest, QueryScanContext, RegionEngineRef, RegionScannerRef,
 };
-use store_api::storage::{ScanRequest, TimeSeriesDistribution};
+use store_api::storage::{ProjectionInput, RegionId, ScanRequest, TimeSeriesDistribution};
+use tokio::runtime::Handle;
+use tokio::task::block_in_place;
 
 use crate::table::metrics::StreamMetrics;
+use crate::table::projection_pushdown::{
+    collect_nested_paths_from_projection, merge_projection_input_with_nested_paths,
+};
 
 /// A plan to read multiple partitions from a region of a table.
 #[derive(Clone)]
 pub struct RegionScanExec {
     scanner: Arc<Mutex<RegionScannerRef>>,
+    region_id: Option<RegionId>,
+    engine: Option<RegionEngineRef>,
+    request: ScanRequest,
     arrow_schema: ArrowSchemaRef,
     /// The expected output ordering for the plan.
     output_ordering: Option<Vec<PhysicalSortExpr>>,
@@ -74,6 +83,7 @@ impl std::fmt::Debug for RegionScanExec {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RegionScanExec")
             .field("scanner", &self.scanner)
+            .field("region_id", &self.region_id)
             .field("arrow_schema", &self.arrow_schema)
             .field("output_ordering", &self.output_ordering)
             .field("metric", &self.metric)
@@ -92,7 +102,10 @@ impl RegionScanExec {
         scanner: RegionScannerRef,
         request: ScanRequest,
         query_memory_tracker: Option<QueryMemoryTracker>,
+        region_id: Option<RegionId>,
+        engine: Option<RegionEngineRef>,
     ) -> DfResult<Self> {
+        let distribution = request.distribution;
         let arrow_schema = scanner.schema().arrow_schema().clone();
         let scanner_props = scanner.properties();
         let mut num_output_partition = scanner_props.num_partitions();
@@ -217,6 +230,9 @@ impl RegionScanExec {
         let total_rows = scanner_props.total_rows();
         Ok(Self {
             scanner: Arc::new(Mutex::new(scanner)),
+            region_id,
+            engine,
+            request,
             arrow_schema,
             output_ordering: None,
             metric: ExecutionPlanMetricsSet::new(),
@@ -224,7 +240,7 @@ impl RegionScanExec {
             append_mode,
             total_rows,
             is_partition_set: false,
-            distribution: request.distribution,
+            distribution,
             explain_verbose: false,
             query_memory_tracker,
         })
@@ -290,6 +306,9 @@ impl RegionScanExec {
 
         Ok(Self {
             scanner: self.scanner.clone(),
+            region_id: self.region_id,
+            engine: self.engine.clone(),
+            request: self.request.clone(),
             arrow_schema: self.arrow_schema.clone(),
             output_ordering: self.output_ordering.clone(),
             metric: self.metric.clone(),
@@ -467,6 +486,64 @@ impl ExecutionPlan for RegionScanExec {
             updated_node: Some(new_self),
         })
     }
+
+    fn try_swapping_with_projection(
+        &self,
+        projection: &ProjectionExec,
+    ) -> DfResult<Option<Arc<dyn ExecutionPlan>>> {
+        info!("try_swapping_with_projection: {:?}", projection);
+
+        let nested_paths = collect_nested_paths_from_projection(projection);
+        if nested_paths.is_empty() {
+            return Ok(Some(Arc::new(projection.clone())));
+        }
+
+        let projection_input = if let Some(base) = &self.request.projection_input {
+            let Some(merged) = merge_projection_input_with_nested_paths(base, nested_paths) else {
+                return Ok(Some(Arc::new(projection.clone())));
+            };
+            merged
+        } else {
+            let metadata = self.scanner.lock().unwrap().metadata();
+            let projection = nested_paths
+                .iter()
+                .filter_map(|path| path.first())
+                .filter_map(|root_name| metadata.column_by_name(root_name))
+                .map(|column| metadata.column_index_by_id(column.column_id))
+                .collect::<Option<Vec<_>>>()
+                .ok_or_else(|| {
+                    DataFusionError::Plan(
+                        "failed to build projection input from projection paths".to_string(),
+                    )
+                })?;
+
+            ProjectionInput::new(projection).with_nested_paths(nested_paths)
+        };
+
+        let (Some(region_id), Some(engine)) = (self.region_id, self.engine.clone()) else {
+            return Ok(Some(Arc::new(projection.clone())));
+        };
+
+        let mut request = self.request.clone();
+        request.projection_input = Some(projection_input);
+
+        let scanner = block_in_place(|| {
+            Handle::current().block_on(engine.handle_query(region_id, request.clone()))
+        })
+        .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        let mut new_scan = Self::new(
+            scanner,
+            request,
+            self.query_memory_tracker.clone(),
+            Some(region_id),
+            Some(engine),
+        )?;
+        new_scan.explain_verbose = self.explain_verbose;
+
+        let new_projection =
+            Arc::new(projection.clone()).with_new_children(vec![Arc::new(new_scan)])?;
+        Ok(Some(new_projection))
+    }
 }
 
 impl DisplayAs for RegionScanExec {
@@ -605,7 +682,7 @@ mod test {
             region_metadata,
             None,
         ));
-        let plan = RegionScanExec::new(scanner, ScanRequest::default(), None).unwrap();
+        let plan = RegionScanExec::new(scanner, ScanRequest::default(), None, None, None).unwrap();
         let actual: SchemaRef = Arc::new(
             plan.properties
                 .eq_properties

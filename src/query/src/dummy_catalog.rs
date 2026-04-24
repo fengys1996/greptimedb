@@ -206,7 +206,13 @@ impl TableProvider for DummyTableProvider {
         }
 
         let query_memory_tracker = self.engine.query_memory_tracker();
-        let mut scan_exec = RegionScanExec::new(scanner, request, query_memory_tracker)?;
+        let mut scan_exec = RegionScanExec::new(
+            scanner,
+            request,
+            query_memory_tracker,
+            Some(self.region_id),
+            Some(self.engine.clone()),
+        )?;
         if let Some(query_ctx) = &self.query_ctx {
             scan_exec.set_explain_verbose(query_ctx.explain_verbose());
         }

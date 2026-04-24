@@ -927,7 +927,9 @@ mod tests {
             update_calls.clone(),
             last_filter_len.clone(),
         ));
-        let scan = Arc::new(RegionScanExec::new(scanner, ScanRequest::default(), None).unwrap());
+        let scan = Arc::new(
+            RegionScanExec::new(scanner, ScanRequest::default(), None, None, None).unwrap(),
+        );
 
         let sort_expr = PhysicalSortExpr {
             expr: Arc::new(Column::new("ts", 0)),
@@ -1016,6 +1018,8 @@ mod tests {
                 )),
                 ScanRequest::default(),
                 None,
+                None,
+                None,
             )
             .unwrap(),
         );
@@ -1028,6 +1032,8 @@ mod tests {
                     right_last_filter_len.clone(),
                 )),
                 ScanRequest::default(),
+                None,
+                None,
                 None,
             )
             .unwrap(),
