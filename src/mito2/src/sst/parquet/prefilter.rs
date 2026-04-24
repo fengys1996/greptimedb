@@ -402,6 +402,7 @@ mod tests {
     use store_api::codec::PrimaryKeyEncoding;
 
     use super::*;
+    use crate::read::read_columns::ReadColumns;
     use crate::sst::internal_fields;
     use crate::sst::parquet::flat_format::FlatReadFormat;
     use crate::test_util::sst_util::{
@@ -413,14 +414,10 @@ mod tests {
         let metadata = Arc::new(sst_region_metadata_with_encoding(
             PrimaryKeyEncoding::Sparse,
         ));
-        let read_format = FlatReadFormat::new(
-            metadata.clone(),
-            metadata.column_metadatas.iter().map(|c| c.column_id),
-            None,
-            "test",
-            true,
-        )
-        .unwrap();
+        let read_cols =
+            ReadColumns::from_column_ids(metadata.column_metadatas.iter().map(|c| c.column_id));
+        let read_format =
+            FlatReadFormat::new(metadata.clone(), &read_cols, None, "test", true).unwrap();
         assert!(!read_format.batch_has_raw_pk_columns());
 
         let filter = SimpleFilterEvaluator::try_new(&col("tag_0").eq(lit("b"))).unwrap();
