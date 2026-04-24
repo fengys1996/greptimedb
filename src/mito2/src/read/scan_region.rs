@@ -56,7 +56,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use crate::access_layer::AccessLayerRef;
 use crate::cache::{CacheStrategy, CachedSstMeta};
 use crate::config::DEFAULT_MAX_CONCURRENT_SCAN_FILES;
-use crate::error::{InvalidMetaSnafu, InvalidPartitionExprSnafu, InvalidRequestSnafu, Result};
+use crate::error::{InvalidMetaSnafu, InvalidPartitionExprSnafu, Result};
 #[cfg(feature = "enterprise")]
 use crate::extension::{BoxedExtensionRange, BoxedExtensionRangeProvider};
 use crate::memtable::{MemtableRange, RangesOptions};

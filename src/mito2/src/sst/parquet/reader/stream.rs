@@ -15,8 +15,6 @@
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use common_error::ext::{BoxedError, PlainError};
-use common_error::status_code::StatusCode;
 use datafusion_common::cast_column;
 use datafusion_common::format::DEFAULT_CAST_OPTIONS;
 use datatypes::arrow::array::{ArrayRef, new_null_array};
@@ -27,7 +25,7 @@ use parquet::arrow::async_reader::ParquetRecordBatchStream;
 use snafu::{IntoError, ResultExt, ensure};
 
 use crate::error::{
-    CastColumnSnafu, ExternalSnafu, NewRecordBatchSnafu, ReadParquetSnafu, Result, UnexpectedSnafu,
+    CastColumnSnafu, NewRecordBatchSnafu, ReadParquetSnafu, Result, UnexpectedSnafu,
 };
 use crate::sst::parquet::async_reader::SstAsyncFileReader;
 
