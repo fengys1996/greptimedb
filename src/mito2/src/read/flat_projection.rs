@@ -18,14 +18,10 @@ use std::sync::Arc;
 
 use api::v1::SemanticType;
 use common_error::ext::BoxedError;
-use common_recordbatch::error::{
-    ArrowComputeSnafu, CastColumnSnafu, ExternalSnafu, NewDfRecordBatchSnafu,
-};
+use common_recordbatch::error::{ArrowComputeSnafu, ExternalSnafu, NewDfRecordBatchSnafu};
 use common_recordbatch::{DfRecordBatch, RecordBatch};
-use datafusion_common::cast_column;
 use datatypes::arrow::array::Array;
 use datatypes::arrow::datatypes::{DataType as ArrowDataType, Field};
-use datatypes::compute::CastOptions;
 use datatypes::prelude::{ConcreteDataType, DataType};
 use datatypes::schema::{Schema, SchemaRef};
 use datatypes::value::Value;
@@ -255,7 +251,6 @@ impl FlatProjectionMapper {
         }
         // Construct output record batch directly from Arrow arrays to avoid
         // Arrow -> Vector -> Arrow roundtrips in the hot path.
-        let output_arrow_schema = self.output_schema.arrow_schema();
         let mut arrays = Vec::with_capacity(self.output_schema.num_columns());
         for (output_idx, index) in self.batch_indices.iter().enumerate() {
             let mut array = batch.column(*index).clone();
@@ -287,28 +282,13 @@ impl FlatProjectionMapper {
                         .context(ArrowComputeSnafu)?;
                     array = casted;
                 }
-            } else {
-                // ProjectionMapper still builds the output schema based on
-                // root-level projection indices and does not yet prune struct
-                // fields according to nested paths. Meanwhile, the SST read
-                // path already respects nested paths, so the input struct column
-                // here may be narrower than what the output schema expects.
-                // We need to cast it back to the output schema to keep downstream
-                // batch construction type-consistent.
-                let target_field = output_arrow_schema.field(output_idx);
-                let target_datatype = target_field.data_type();
-                let is_struct = matches!(target_datatype, ArrowDataType::Struct(..));
-                if is_struct && target_datatype != batch.schema().field(*index).data_type() {
-                    let source_col = batch.column(*index);
-                    array = cast_column(source_col, target_field, &CastOptions::default())
-                        .context(CastColumnSnafu)?;
-                }
             }
             arrays.push(array);
         }
 
-        let df_record_batch = DfRecordBatch::try_new(output_arrow_schema.clone(), arrays)
-            .context(NewDfRecordBatchSnafu)?;
+        let df_record_batch =
+            DfRecordBatch::try_new(self.output_schema.arrow_schema().clone(), arrays)
+                .context(NewDfRecordBatchSnafu)?;
         Ok(RecordBatch::from_df_record_batch(
             self.output_schema.clone(),
             df_record_batch,

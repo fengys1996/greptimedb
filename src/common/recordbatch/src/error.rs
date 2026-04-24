@@ -81,14 +81,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to cast column"))]
-    CastColumn {
-        #[snafu(source)]
-        error: datafusion::error::DataFusionError,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Fail to format record batch"))]
     Format {
         #[snafu(source)]
@@ -211,7 +203,6 @@ impl ErrorExt for Error {
             | Error::ToArrowScalar { .. }
             | Error::ProjectArrowRecordBatch { .. }
             | Error::PhysicalExpr { .. }
-            | Error::CastColumn { .. }
             | Error::RecordBatchSliceIndexOverflow { .. } => StatusCode::Internal,
 
             Error::PollStream { .. } => StatusCode::EngineExecuteQuery,

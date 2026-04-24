@@ -46,7 +46,7 @@ use store_api::region_request::PathType;
 use store_api::storage::{ColumnId, FileId};
 use table::predicate::Predicate;
 
-use self::stream::{ParquetErrorAdapter, ProjectedRecordBatchStream};
+use self::stream::{NestedSchemaAligner, ParquetErrorAdapter, ProjectedRecordBatchStream};
 use crate::cache::index::result_cache::PredicateKey;
 use crate::cache::{CacheStrategy, CachedSstMeta};
 #[cfg(feature = "vector_index")]
@@ -1734,11 +1734,12 @@ impl RowGroupReaderBuilder {
         stream: ParquetRecordBatchStream<SstAsyncFileReader>,
     ) -> Result<ProjectedRecordBatchStream> {
         let stream = ParquetErrorAdapter::new(stream, self.file_path.clone());
-        ProjectedRecordBatchStream::new(
+        let stream = stream::MissingColFiller::new(
             stream,
             self.projection.projected_root_presence.clone(),
             self.output_schema.clone(),
-        )
+        )?;
+        Ok(NestedSchemaAligner::new(stream, self.output_schema.clone()))
     }
 
     /// Builds a [ParquetRecordBatchStream] with a custom projection mask.
