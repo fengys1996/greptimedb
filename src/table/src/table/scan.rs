@@ -14,7 +14,7 @@
 
 use std::any::Any;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::task::{Context, Poll};
 use std::time::Instant;
 
@@ -57,6 +57,15 @@ use crate::table::metrics::StreamMetrics;
 use crate::table::projection_pushdown::{
     collect_nested_paths_from_projection, merge_projection_input_with_nested_paths,
 };
+
+const GREPTIME_ENABLE_SWAP_WITH_PROJECTION: &str = "GREPTIME_ENABLE_SWAP_WITH_PROJECTION";
+
+static ENABLE_SWAP_WITH_PROJECTION: LazyLock<bool> = LazyLock::new(|| {
+    std::env::var(GREPTIME_ENABLE_SWAP_WITH_PROJECTION)
+        .ok()
+        .and_then(|v| v.parse::<bool>().ok())
+        .unwrap_or(true)
+});
 
 /// A plan to read multiple partitions from a region of a table.
 #[derive(Clone)]
@@ -492,6 +501,10 @@ impl ExecutionPlan for RegionScanExec {
         projection: &ProjectionExec,
     ) -> DfResult<Option<Arc<dyn ExecutionPlan>>> {
         info!("try_swapping_with_projection: {:?}", projection);
+
+        if !*ENABLE_SWAP_WITH_PROJECTION {
+            return Ok(Some(Arc::new(projection.clone())));
+        }
 
         let nested_paths = collect_nested_paths_from_projection(projection);
         if nested_paths.is_empty() {
