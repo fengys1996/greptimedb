@@ -19,6 +19,7 @@ use std::num::NonZeroUsize;
 
 use async_trait::async_trait;
 use futures::Stream;
+use greptime_proto::v1::ColumnDataType;
 
 use crate::Bytes;
 use crate::bitmap::{Bitmap, BitmapType};
@@ -34,6 +35,7 @@ pub trait InvertedIndexWriter: Send {
     /// Adds entries to an index.
     ///
     /// * `name` is the index identifier.
+    /// * `term_type` is the logical data type used to encode index terms in this SST.
     /// * `null_bitmap` marks positions of null entries.
     /// * `values` is a stream of values and their locations, yielded lexicographically.
     ///    Errors occur if the values are out of order.
@@ -41,6 +43,7 @@ pub trait InvertedIndexWriter: Send {
     async fn add_index(
         &mut self,
         name: String,
+        term_type: ColumnDataType,
         null_bitmap: Bitmap,
         values: ValueStream,
         bitmap_type: BitmapType,

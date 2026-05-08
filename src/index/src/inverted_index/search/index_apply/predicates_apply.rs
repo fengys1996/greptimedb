@@ -12,9 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::mem::size_of;
 
 use async_trait::async_trait;
+use common_telemetry::debug;
+use greptime_proto::v1::ColumnDataType;
 use greptime_proto::v1::index::InvertedIndexMetas;
 
 use crate::bitmap::Bitmap;
@@ -37,6 +40,8 @@ pub struct PredicatesIndexApplier {
     /// A list of `FstApplier`s, each associated with a specific index name
     /// (e.g. a tag field uses its column name as index name)
     fst_appliers: Vec<(IndexName, Box<dyn FstApplier>)>,
+    /// Expected term type for each index name.
+    expected_term_types: HashMap<IndexName, ColumnDataType>,
 }
 
 #[async_trait]
@@ -75,6 +80,29 @@ impl IndexApplier for PredicatesIndexApplier {
                     }
                 }
             };
+            // TODO: refactor it later
+            if let Some(expected_term_type) = self.expected_term_types.get(name) {
+                // Skip index if term type is unknown/missing or mismatched.
+                let actual_term_type = ColumnDataType::try_from(meta.term_type);
+                if actual_term_type.is_err() {
+                    debug!(
+                        index_name = name,
+                        actual_term_type = meta.term_type,
+                        expected_term_type = format!("{expected_term_type:?}"),
+                        "Skip inverted index due to unknown term_type in metadata"
+                    );
+                    continue;
+                }
+                if meta.term_type != *expected_term_type as i32 {
+                    debug!(
+                        index_name = name,
+                        actual_term_type = format!("{:?}", actual_term_type.unwrap()),
+                        expected_term_type = format!("{expected_term_type:?}"),
+                        "Skip inverted index due to term_type mismatch"
+                    );
+                    continue;
+                }
+            }
             let fst_offset = meta.base_offset + meta.relative_fst_offset as u64;
             let fst_size = meta.fst_size as u64;
             appliers.push((fst_applier, meta));
@@ -116,6 +144,10 @@ impl IndexApplier for PredicatesIndexApplier {
             size += name.capacity();
             size += fst_applier.memory_usage();
         }
+        size += self.expected_term_types.capacity() * size_of::<(IndexName, ColumnDataType)>();
+        for name in self.expected_term_types.keys() {
+            size += name.capacity();
+        }
         size
     }
 }
@@ -123,7 +155,15 @@ impl IndexApplier for PredicatesIndexApplier {
 impl PredicatesIndexApplier {
     /// Constructs an instance of `PredicatesIndexApplier` based on a list of tag predicates.
     /// Chooses an appropriate `FstApplier` for each index name based on the nature of its predicates.
-    pub fn try_from(mut predicates: Vec<(IndexName, Vec<Predicate>)>) -> Result<Self> {
+    pub fn try_from(predicates: Vec<(IndexName, Vec<Predicate>)>) -> Result<Self> {
+        Self::try_from_with_term_types(predicates, HashMap::new())
+    }
+
+    /// Same as `try_from`, but with expected term types for each index name.
+    pub fn try_from_with_term_types(
+        mut predicates: Vec<(IndexName, Vec<Predicate>)>,
+        expected_term_types: HashMap<IndexName, ColumnDataType>,
+    ) -> Result<Self> {
         let mut fst_appliers = Vec::with_capacity(predicates.len());
 
         // InList predicates are applied first to benefit from higher selectivity.
@@ -145,7 +185,10 @@ impl PredicatesIndexApplier {
             fst_appliers.push((column_name, fst_applier));
         }
 
-        Ok(PredicatesIndexApplier { fst_appliers })
+        Ok(PredicatesIndexApplier {
+            fst_appliers,
+            expected_term_types,
+        })
     }
 
     /// Creates a `Bitmap` representing the full range of data in the index for initial scanning.
@@ -217,6 +260,7 @@ mod tests {
         // An index applier that point-gets "tag-0_value-0" on tag "tag-0"
         let applier = PredicatesIndexApplier {
             fst_appliers: vec![(s("tag-0"), key_fst_applier("tag-0_value-0"))],
+            expected_term_types: HashMap::new(),
         };
 
         // An index reader with a single tag "tag-0" and a corresponding value "tag-0_value-0"
@@ -277,6 +321,7 @@ mod tests {
                 (s("tag-0"), key_fst_applier("tag-0_value-0")),
                 (s("tag-1"), key_fst_applier("tag-1_value-a")),
             ],
+            expected_term_types: HashMap::new(),
         };
 
         // An index reader with two tags "tag-0" and "tag-1" and respective values "tag-0_value-0" and "tag-1_value-a"
@@ -332,6 +377,7 @@ mod tests {
     async fn test_index_applier_without_predicates() {
         let applier = PredicatesIndexApplier {
             fst_appliers: vec![],
+            expected_term_types: HashMap::new(),
         };
 
         let mut mock_reader: MockInvertedIndexReader = MockInvertedIndexReader::new();
@@ -362,6 +408,7 @@ mod tests {
 
         let applier = PredicatesIndexApplier {
             fst_appliers: vec![(s("tag-0"), Box::new(mock_fst_applier))],
+            expected_term_types: HashMap::new(),
         };
 
         let output = applier
@@ -383,6 +430,7 @@ mod tests {
 
         let applier = PredicatesIndexApplier {
             fst_appliers: vec![(s("tag-0"), Box::new(mock_fst_applier))],
+            expected_term_types: HashMap::new(),
         };
 
         let result = applier
@@ -428,6 +476,7 @@ mod tests {
 
         let applier = PredicatesIndexApplier {
             fst_appliers: vec![(s("tag-0"), Box::new(mock_fst_applier))],
+            expected_term_types: HashMap::new(),
         };
 
         assert_eq!(

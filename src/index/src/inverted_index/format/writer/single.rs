@@ -14,6 +14,7 @@
 
 use fst::MapBuilder;
 use futures::{AsyncWrite, AsyncWriteExt, Stream, StreamExt};
+use greptime_proto::v1::ColumnDataType;
 use greptime_proto::v1::index::{InvertedIndexMeta, InvertedIndexStats};
 use snafu::ResultExt;
 
@@ -53,6 +54,7 @@ where
     /// Constructs a new `SingleIndexWriter`
     pub fn new(
         name: String,
+        term_type: ColumnDataType,
         base_offset: u64,
         null_bitmap: Bitmap,
         values: S,
@@ -71,6 +73,7 @@ where
                 base_offset,
                 stats: Some(InvertedIndexStats::default()),
                 bitmap_type: bitmap_type.into(),
+                term_type: term_type.into(),
                 ..Default::default()
             },
         }
@@ -162,6 +165,7 @@ where
 #[cfg(test)]
 mod tests {
     use futures::stream;
+    use greptime_proto::v1::ColumnDataType;
 
     use super::*;
     use crate::Bytes;
@@ -172,6 +176,7 @@ mod tests {
         let mut blob = Vec::new();
         let writer = SingleIndexWriter::new(
             "test".to_string(),
+            ColumnDataType::String,
             0,
             Bitmap::new_roaring(),
             stream::empty(),
@@ -190,6 +195,7 @@ mod tests {
         let mut blob = Vec::new();
         let writer = SingleIndexWriter::new(
             "test".to_string(),
+            ColumnDataType::String,
             0,
             Bitmap::from_lsb0_bytes(&[0b0000_0001, 0b0000_0000], BitmapType::Roaring),
             stream::iter(vec![
@@ -225,6 +231,7 @@ mod tests {
         let mut blob = Vec::new();
         let writer = SingleIndexWriter::new(
             "test".to_string(),
+            ColumnDataType::String,
             0,
             Bitmap::from_lsb0_bytes(&[0b0000_0001, 0b0000_0000], BitmapType::Roaring),
             stream::iter(vec![

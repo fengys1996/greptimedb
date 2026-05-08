@@ -16,13 +16,14 @@ use std::collections::HashMap;
 use std::num::NonZeroUsize;
 
 use async_trait::async_trait;
-use snafu::ensure;
+use greptime_proto::v1::ColumnDataType;
+use snafu::{OptionExt, ensure};
 
 use crate::BytesRef;
 use crate::bitmap::BitmapType;
 use crate::inverted_index::create::InvertedIndexCreator;
 use crate::inverted_index::create::sort::{SortOutput, Sorter};
-use crate::inverted_index::error::{InconsistentRowCountSnafu, Result};
+use crate::inverted_index::error::{InconsistentRowCountSnafu, MissingTermTypeSnafu, Result};
 use crate::inverted_index::format::writer::InvertedIndexWriter;
 
 type IndexName = String;
@@ -42,6 +43,9 @@ pub struct SortIndexCreator {
 
     /// Number of rows in each segment, used to produce sorters
     segment_row_count: NonZeroUsize,
+
+    /// Optional term type per index name.
+    index_term_types: HashMap<IndexName, ColumnDataType>,
 }
 
 #[async_trait]
@@ -92,8 +96,21 @@ impl InvertedIndexCreator for SortIndexCreator {
                 }
             );
 
+            let term_type =
+                self.index_term_types
+                    .get(&index_name)
+                    .context(MissingTermTypeSnafu {
+                        index_name: &index_name,
+                    })?;
+
             writer
-                .add_index(index_name, segment_null_bitmap, sorted_stream, bitmap_type)
+                .add_index(
+                    index_name,
+                    *term_type,
+                    segment_null_bitmap,
+                    sorted_stream,
+                    bitmap_type,
+                )
                 .await?;
         }
 
@@ -105,11 +122,16 @@ impl InvertedIndexCreator for SortIndexCreator {
 
 impl SortIndexCreator {
     /// Creates a new `SortIndexCreator` with the given sorter factory and index writer
-    pub fn new(sorter_factory: SorterFactory, segment_row_count: NonZeroUsize) -> Self {
+    pub fn new(
+        sorter_factory: SorterFactory,
+        segment_row_count: NonZeroUsize,
+        index_term_types: HashMap<IndexName, ColumnDataType>,
+    ) -> Self {
         Self {
             sorter_factory,
             sorters: HashMap::new(),
             segment_row_count,
+            index_term_types,
         }
     }
 }
@@ -120,6 +142,7 @@ mod tests {
 
     use common_base::BitVec;
     use futures::{StreamExt, stream};
+    use greptime_proto::v1::ColumnDataType;
 
     use super::*;
     use crate::Bytes;
@@ -127,10 +150,20 @@ mod tests {
     use crate::inverted_index::error::Error;
     use crate::inverted_index::format::writer::{MockInvertedIndexWriter, ValueStream};
 
+    fn test_term_types(names: &[&str]) -> HashMap<String, ColumnDataType> {
+        names
+            .iter()
+            .map(|name| (name.to_string(), ColumnDataType::String))
+            .collect()
+    }
+
     #[tokio::test]
     async fn test_sort_index_creator_basic() {
-        let mut creator =
-            SortIndexCreator::new(NaiveSorter::factory(), NonZeroUsize::new(1).unwrap());
+        let mut creator = SortIndexCreator::new(
+            NaiveSorter::factory(),
+            NonZeroUsize::new(1).unwrap(),
+            test_term_types(&["a", "b", "c"]),
+        );
 
         let index_values = vec![
             ("a", vec![b"3", b"2", b"1"]),
@@ -149,8 +182,9 @@ mod tests {
 
         let mut mock_writer = MockInvertedIndexWriter::new();
         mock_writer.expect_add_index().times(3).returning(
-            |name, null_bitmap, stream, bitmap_type| {
+            |name, term_type, null_bitmap, stream, bitmap_type| {
                 assert!(null_bitmap.is_empty());
+                assert_eq!(term_type, ColumnDataType::String);
                 assert_eq!(bitmap_type, BitmapType::Roaring);
                 match name.as_str() {
                     "a" => assert_eq!(stream_to_values(stream), vec![b"1", b"2", b"3"]),
@@ -178,8 +212,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_sort_index_creator_inconsistent_row_count() {
-        let mut creator =
-            SortIndexCreator::new(NaiveSorter::factory(), NonZeroUsize::new(1).unwrap());
+        let mut creator = SortIndexCreator::new(
+            NaiveSorter::factory(),
+            NonZeroUsize::new(1).unwrap(),
+            test_term_types(&["a", "b", "c"]),
+        );
 
         let index_values = vec![
             ("a", vec![b"3", b"2", b"1"]),
@@ -197,10 +234,10 @@ mod tests {
         }
 
         let mut mock_writer = MockInvertedIndexWriter::new();
-        mock_writer
-            .expect_add_index()
-            .returning(|name, null_bitmap, stream, bitmap_type| {
+        mock_writer.expect_add_index().returning(
+            |name, term_type, null_bitmap, stream, bitmap_type| {
                 assert!(null_bitmap.is_empty());
+                assert_eq!(term_type, ColumnDataType::String);
                 assert_eq!(bitmap_type, BitmapType::Roaring);
                 match name.as_str() {
                     "a" => assert_eq!(stream_to_values(stream), vec![b"1", b"2", b"3"]),
@@ -209,7 +246,8 @@ mod tests {
                     _ => panic!("unexpected index name: {}", name),
                 }
                 Ok(())
-            });
+            },
+        );
         mock_writer.expect_finish().never();
 
         let res = creator.finish(&mut mock_writer, BitmapType::Roaring).await;
@@ -218,23 +256,27 @@ mod tests {
 
     #[tokio::test]
     async fn test_sort_index_creator_create_indexes_without_data() {
-        let mut creator =
-            SortIndexCreator::new(NaiveSorter::factory(), NonZeroUsize::new(1).unwrap());
+        let mut creator = SortIndexCreator::new(
+            NaiveSorter::factory(),
+            NonZeroUsize::new(1).unwrap(),
+            test_term_types(&["a", "b", "c"]),
+        );
 
         creator.push_with_name_n("a", None, 0).await.unwrap();
         creator.push_with_name_n("b", None, 0).await.unwrap();
         creator.push_with_name_n("c", None, 0).await.unwrap();
 
         let mut mock_writer = MockInvertedIndexWriter::new();
-        mock_writer
-            .expect_add_index()
-            .returning(|name, null_bitmap, stream, bitmap_type| {
+        mock_writer.expect_add_index().returning(
+            |name, term_type, null_bitmap, stream, bitmap_type| {
                 assert!(null_bitmap.is_empty());
+                assert_eq!(term_type, ColumnDataType::String);
                 assert_eq!(bitmap_type, BitmapType::Roaring);
                 assert!(matches!(name.as_str(), "a" | "b" | "c"));
                 assert!(stream_to_values(stream).is_empty());
                 Ok(())
-            });
+            },
+        );
         mock_writer
             .expect_finish()
             .times(1)
@@ -248,6 +290,24 @@ mod tests {
             .finish(&mut mock_writer, BitmapType::Roaring)
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_sort_index_creator_missing_term_type() {
+        let mut creator = SortIndexCreator::new(
+            NaiveSorter::factory(),
+            NonZeroUsize::new(1).unwrap(),
+            HashMap::new(),
+        );
+
+        creator.push_with_name("a", Some(b"1")).await.unwrap();
+
+        let mut mock_writer = MockInvertedIndexWriter::new();
+        mock_writer.expect_add_index().never();
+        mock_writer.expect_finish().never();
+
+        let res = creator.finish(&mut mock_writer, BitmapType::Roaring).await;
+        assert!(matches!(res, Err(Error::MissingTermType { .. })));
     }
 
     fn set_bit(bit_vec: &mut BitVec, index: usize) {

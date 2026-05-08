@@ -16,6 +16,7 @@ use std::num::NonZeroUsize;
 
 use async_trait::async_trait;
 use futures::{AsyncWrite, AsyncWriteExt};
+use greptime_proto::v1::ColumnDataType;
 use greptime_proto::v1::index::InvertedIndexMetas;
 use prost::Message;
 use snafu::ResultExt;
@@ -34,7 +35,7 @@ pub struct InvertedIndexBlobWriter<W> {
     /// Tracks the total number of bytes written to the storage so far
     written_size: u64,
 
-    /// Metadata about each index that has been written  
+    /// Metadata about each index that has been written
     metas: InvertedIndexMetas,
 }
 
@@ -43,12 +44,14 @@ impl<W: AsyncWrite + Send + Unpin> InvertedIndexWriter for InvertedIndexBlobWrit
     async fn add_index(
         &mut self,
         name: String,
+        term_type: ColumnDataType,
         null_bitmap: Bitmap,
         values: ValueStream,
         bitmap_type: BitmapType,
     ) -> Result<()> {
         let single_writer = SingleIndexWriter::new(
             name.clone(),
+            term_type,
             self.written_size,
             null_bitmap,
             values,
@@ -102,6 +105,7 @@ impl<W: AsyncWrite + Send + Unpin> InvertedIndexBlobWriter<W> {
 #[cfg(test)]
 mod tests {
     use futures::stream;
+    use greptime_proto::v1::ColumnDataType;
     use greptime_proto::v1::index::BitmapType;
 
     use super::*;
@@ -135,6 +139,7 @@ mod tests {
         writer
             .add_index(
                 "tag0".to_string(),
+                ColumnDataType::String,
                 Bitmap::from_lsb0_bytes(&[0b0000_0001, 0b0000_0000], BitmapType::Roaring),
                 Box::new(stream::iter(vec![
                     Ok((
@@ -157,6 +162,7 @@ mod tests {
         writer
             .add_index(
                 "tag1".to_string(),
+                ColumnDataType::String,
                 Bitmap::from_lsb0_bytes(&[0b0000_0001, 0b0000_0000], BitmapType::Roaring),
                 Box::new(stream::iter(vec![
                     Ok((

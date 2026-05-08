@@ -221,6 +221,13 @@ pub enum Error {
         expected_row_count: usize,
     },
 
+    #[snafu(display("Missing term type for index: {index_name}"))]
+    MissingTermType {
+        index_name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("External error"))]
     External {
         source: BoxedError,
@@ -265,6 +272,7 @@ impl ErrorExt for Error {
             | EmptyPredicates { .. }
             | FstInsert { .. }
             | InconsistentRowCount { .. }
+            | MissingTermType { .. }
             | IndexNotFound { .. } => StatusCode::InvalidArguments,
 
             Intermediate { source, .. } => source.status_code(),

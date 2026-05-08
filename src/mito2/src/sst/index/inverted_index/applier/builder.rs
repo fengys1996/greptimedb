@@ -20,6 +20,7 @@ mod regex_match;
 
 use std::collections::{BTreeMap, HashSet};
 
+use api::helper::ColumnDataTypeWrapper;
 use common_telemetry::warn;
 use datafusion_common::ScalarValue;
 use datafusion_expr::{BinaryExpr, Expr, Operator};
@@ -147,7 +148,21 @@ impl<'a> InvertedIndexApplierBuilder<'a> {
                 )
             })
             .collect::<Vec<_>>();
-        let applier = PredicatesIndexApplier::try_from(predicates);
+        let expected_term_types = self
+            .output
+            .keys()
+            .filter_map(|column_id| {
+                let column = self.metadata.column_by_id(*column_id)?;
+                let column_type =
+                    ColumnDataTypeWrapper::try_from(column.column_schema.data_type.clone()).ok()?;
+                Some((
+                    format!("{}", IndexTarget::ColumnId(*column_id)),
+                    column_type.datatype(),
+                ))
+            })
+            .collect();
+        let applier =
+            PredicatesIndexApplier::try_from_with_term_types(predicates, expected_term_types);
 
         Ok(Some(
             InvertedIndexApplier::new(

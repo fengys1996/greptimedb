@@ -184,6 +184,7 @@ impl<R: InvertedIndexReader> InvertedIndexReader for CachedInvertedIndexBlobRead
 mod test {
     use std::num::NonZeroUsize;
 
+    use api::v1::ColumnDataType;
     use futures::stream;
     use index::Bytes;
     use index::bitmap::{Bitmap, BitmapType};
@@ -252,6 +253,7 @@ mod test {
         writer
             .add_index(
                 "tag0".to_string(),
+                ColumnDataType::String,
                 Bitmap::from_lsb0_bytes(&[0b0000_0001, 0b0000_0000], BitmapType::Roaring),
                 Box::new(stream::iter(vec![
                     Ok((
@@ -274,6 +276,7 @@ mod test {
         writer
             .add_index(
                 "tag1".to_string(),
+                ColumnDataType::String,
                 Bitmap::from_lsb0_bytes(&[0b0000_0001, 0b0000_0000], BitmapType::Roaring),
                 Box::new(stream::iter(vec![
                     Ok((

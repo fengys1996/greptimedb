@@ -234,6 +234,19 @@ impl SimpleFilterEvaluator {
     pub fn evaluate_array(&self, input: &ArrayRef) -> Result<BooleanBuffer> {
         self.evaluate_datum(input, input.len())
     }
+    // TODO(fys): remove it later
+    // pub fn evaluate_array(&self, input: &ArrayRef) -> Result<BooleanBuffer> {
+    //     match self.evaluate_datum(input, input.len()) {
+    //         Ok(result) => Ok(result),
+    //         Err(first_err) => {
+    //             // Fallback for schema-evolution scenarios where the physical
+    //             // array type differs from the literal type (e.g. Float64 vs Utf8).
+    //             let literal_type = self.literal.get().0.data_type().clone();
+    //             let casted = cast(input, &literal_type).context(ArrowComputeSnafu)?;
+    //             self.evaluate_datum(&casted, casted.len()).map_err(|_| first_err)
+    //         }
+    //     }
+    // }
 
     pub fn evaluate_vector(&self, input: &VectorRef) -> Result<BooleanBuffer> {
         self.evaluate_datum(&input.to_arrow_array(), input.len())

@@ -17,6 +17,7 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
+use api::helper::ColumnDataTypeWrapper;
 use api::v1::SemanticType;
 use common_telemetry::{debug, warn};
 use datatypes::arrow::record_batch::RecordBatch;
@@ -106,7 +107,24 @@ impl InvertedIndexer {
             memory_usage.clone(),
             memory_usage_threshold,
         );
-        let index_creator = Box::new(SortIndexCreator::new(sorter, segment_row_count));
+        let index_term_types = indexed_column_ids
+            .iter()
+            .filter_map(|col_id| {
+                let column_meta = metadata.column_by_id(*col_id)?;
+                let data_type =
+                    ColumnDataTypeWrapper::try_from(column_meta.column_schema.data_type.clone())
+                        .ok()?;
+                // TODO: use common funtion instead of using debug of Column id,
+                // which make me confusing.
+                let target_key = format!("{}", IndexTarget::ColumnId(*col_id));
+                Some((target_key, data_type.datatype()))
+            })
+            .collect();
+        let index_creator = Box::new(SortIndexCreator::new(
+            sorter,
+            segment_row_count,
+            index_term_types,
+        ));
 
         let codec = IndexValuesCodec::from_tag_columns(
             metadata.primary_key_encoding,
