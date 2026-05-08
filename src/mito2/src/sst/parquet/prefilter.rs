@@ -23,9 +23,12 @@ use std::ops::{BitAnd, Range};
 use std::sync::Arc;
 
 use api::v1::SemanticType;
+use common_telemetry::debug;
+use common_recordbatch::error::Error as RecordBatchError;
 use common_recordbatch::filter::SimpleFilterEvaluator;
 use datatypes::arrow::array::{Array, BinaryArray, BooleanArray, BooleanBufferBuilder};
 use datatypes::arrow::buffer::BooleanBuffer;
+use datatypes::arrow::error::ArrowError;
 use datatypes::arrow::record_batch::RecordBatch;
 use futures::StreamExt;
 use mito_codec::row_converter::{PrimaryKeyCodec, PrimaryKeyFilter};
@@ -667,7 +670,18 @@ fn apply_filters_to_batch(
                 ),
             })?;
         let column = batch.column(idx).clone();
-        let result = filter.evaluate_array(&column).context(RecordBatchSnafu)?;
+        let result = match filter.evaluate_array(&column) {
+            Ok(result) => result,
+            Err(err) if is_invalid_comparison_error(&err) => {
+                debug!(
+                    "Skip prefilter for column '{}' due to incompatible comparison type on file {}",
+                    filter.column_name(),
+                    file_path
+                );
+                continue;
+            }
+            Err(err) => return Err(err).context(RecordBatchSnafu),
+        };
         mask = mask.bitand(&result);
     }
 
@@ -715,6 +729,15 @@ fn apply_filters_to_batch(
         Ok(None)
     } else {
         Ok(Some(mask))
+    }
+}
+
+fn is_invalid_comparison_error(err: &RecordBatchError) -> bool {
+    match err {
+        RecordBatchError::ArrowCompute { error, .. } => {
+            matches!(error, ArrowError::InvalidArgumentError(msg) if msg.contains("Invalid comparison operation"))
+        }
+        _ => false,
     }
 }
 
@@ -1216,5 +1239,19 @@ mod tests {
             .unwrap();
 
         assert_eq!(mask.count_set_bits(), 2);
+    }
+
+    #[test]
+    fn test_apply_filters_to_batch_skips_incompatible_simple_filter_type() {
+        let metadata: RegionMetadataRef = Arc::new(sst_region_metadata_with_encoding(PrimaryKeyEncoding::Dense));
+        let filters = new_simple_filter_contexts(&metadata, &[col("field_0").eq(lit("23.7"))]);
+        let pk = new_primary_key(&["a", "x"]);
+        let batch = new_raw_batch(&[pk.as_slice(), pk.as_slice(), pk.as_slice()], &[9, 10, 11]);
+
+        let mut no_pk_filter = None;
+        let mask = apply_filters_to_batch(&batch, &mut no_pk_filter, &filters, &[], "test")
+            .unwrap()
+            .unwrap();
+        assert_eq!(mask.count_set_bits(), 3);
     }
 }

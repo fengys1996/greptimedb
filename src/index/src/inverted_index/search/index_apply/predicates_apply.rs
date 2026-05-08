@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::mem::size_of;
 
 use async_trait::async_trait;
-use common_telemetry::debug;
+use common_telemetry::info;
 use greptime_proto::v1::ColumnDataType;
 use greptime_proto::v1::index::InvertedIndexMetas;
 
@@ -65,11 +65,19 @@ impl IndexApplier for PredicatesIndexApplier {
         // TODO(zhongzc): optimize the order of applying to make it quicker to return empty.
         let mut appliers = Vec::with_capacity(self.fst_appliers.len());
         let mut fst_ranges = Vec::with_capacity(self.fst_appliers.len());
+        let mut skipped_by_term_type_mismatch = 0usize;
+        let mut skipped_by_unknown_term_type = 0usize;
+        let mut missing_index = 0usize;
 
         for (name, fst_applier) in &self.fst_appliers {
             let Some(meta) = metadata.metas.get(name) else {
+                missing_index += 1;
                 match context.index_not_found_strategy {
                     IndexNotFoundStrategy::ReturnEmpty => {
+                        info!(
+                            index_name = name,
+                            "Inverted index apply returns empty: index not found and strategy is ReturnEmpty"
+                        );
                         return Ok(output);
                     }
                     IndexNotFoundStrategy::Ignore => {
@@ -85,7 +93,8 @@ impl IndexApplier for PredicatesIndexApplier {
                 // Skip index if term type is unknown/missing or mismatched.
                 let actual_term_type = ColumnDataType::try_from(meta.term_type);
                 if actual_term_type.is_err() {
-                    debug!(
+                    skipped_by_unknown_term_type += 1;
+                    info!(
                         index_name = name,
                         actual_term_type = meta.term_type,
                         expected_term_type = format!("{expected_term_type:?}"),
@@ -94,7 +103,8 @@ impl IndexApplier for PredicatesIndexApplier {
                     continue;
                 }
                 if meta.term_type != *expected_term_type as i32 {
-                    debug!(
+                    skipped_by_term_type_mismatch += 1;
+                    info!(
                         index_name = name,
                         actual_term_type = format!("{:?}", actual_term_type.unwrap()),
                         expected_term_type = format!("{expected_term_type:?}"),
@@ -109,7 +119,17 @@ impl IndexApplier for PredicatesIndexApplier {
             fst_ranges.push(fst_offset..fst_offset + fst_size);
         }
 
+        info!(
+            total_predicate_indexes = self.fst_appliers.len(),
+            selected_indexes = fst_ranges.len(),
+            missing_indexes = missing_index,
+            skipped_by_unknown_term_type,
+            skipped_by_term_type_mismatch,
+            "Inverted index apply selection summary"
+        );
+
         if fst_ranges.is_empty() {
+            info!("No compatible inverted index selected for this SST, fallback to full segment range");
             output.matched_segment_ids = Self::bitmap_full_range(&metadata);
             return Ok(output);
         }

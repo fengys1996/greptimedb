@@ -21,7 +21,7 @@ mod regex_match;
 use std::collections::{BTreeMap, HashSet};
 
 use api::helper::ColumnDataTypeWrapper;
-use common_telemetry::warn;
+use common_telemetry::{info, warn};
 use datafusion_common::ScalarValue;
 use datafusion_expr::{BinaryExpr, Expr, Operator};
 use datatypes::data_type::ConcreteDataType;
@@ -135,8 +135,18 @@ impl<'a> InvertedIndexApplierBuilder<'a> {
         }
 
         if self.output.is_empty() {
+            info!(
+                expr_count = exprs.len(),
+                "No indexable predicates extracted for inverted index; skip building applier"
+            );
             return Ok(None);
         }
+
+        info!(
+            expr_count = exprs.len(),
+            indexed_predicate_columns = self.output.len(),
+            "Extracted indexable predicates for inverted index; building applier"
+        );
 
         let predicates = self
             .output

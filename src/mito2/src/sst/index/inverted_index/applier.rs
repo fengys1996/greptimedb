@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use common_base::range_read::RangeReader;
-use common_telemetry::warn;
+use common_telemetry::{info, warn};
 use index::inverted_index::format::reader::{InvertedIndexBlobReader, InvertedIndexReadMetrics};
 use index::inverted_index::search::index_apply::{
     ApplyOutput, IndexApplier, IndexNotFoundStrategy, SearchContext,
@@ -265,6 +265,19 @@ impl InvertedIndexApplier {
             metrics.apply_elapsed = elapsed;
             metrics.blob_cache_miss = cache_miss;
             metrics.blob_read_bytes = blob_size;
+        }
+
+        if let Ok(output) = &result {
+            info!(
+                file_id = %file_id,
+                matched_segments = output.matched_segment_ids.count_ones(),
+                total_segments = output
+                    .total_row_count
+                    .div_ceil(output.segment_row_count),
+                total_row_count = output.total_row_count,
+                segment_row_count = output.segment_row_count,
+                "Inverted index apply completed"
+            );
         }
 
         result
