@@ -20,7 +20,7 @@ pub mod part;
 pub mod part_reader;
 mod row_group_reader;
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, RwLock};
 use std::time::Instant;
@@ -34,16 +34,20 @@ fn env_usize(name: &str, default: usize) -> usize {
 }
 
 use common_time::Timestamp;
-use datatypes::arrow::datatypes::SchemaRef;
+use datatypes::arrow::datatypes::{DataType as ArrowDataType, SchemaRef};
+use datatypes::data_type::DataType;
+use datatypes::extension::json::is_json_extension_type;
+use datatypes::types::JsonType;
 use mito_codec::key_values::KeyValue;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_with::{DisplayFromStr, serde_as};
+use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, FileId, RegionId, SequenceRange};
 use tokio::sync::Semaphore;
 
-use crate::error::{Result, UnsupportedOperationSnafu};
+use crate::error::{DataTypeMismatchSnafu, Result, UnsupportedOperationSnafu};
 use crate::flush::WriteBufferManagerRef;
 use crate::memtable::bulk::context::BulkIterContext;
 use crate::memtable::bulk::part::{
@@ -1043,6 +1047,49 @@ impl PartToMerge {
             PartToMerge::Encoded { part, .. } => part.read(context, None, None),
         }
     }
+
+    /// Returns schemas of in-memory batches in this part.
+    fn batch_schemas(&self) -> Vec<SchemaRef> {
+        match self {
+            PartToMerge::Bulk { part, .. } => vec![part.batch.schema_ref().clone()],
+            PartToMerge::Multi { part, .. } => part.batch_schemas().collect(),
+            PartToMerge::Encoded { .. } => Vec::new(),
+        }
+    }
+}
+
+fn merge_arrow_schema_for_parts(
+    metadata: &RegionMetadataRef,
+    base_schema: &SchemaRef,
+    parts: &[PartToMerge],
+) -> Result<SchemaRef> {
+    let mut concretized_json_types = HashMap::<String, ArrowDataType>::new();
+
+    for schema in parts.iter().flat_map(PartToMerge::batch_schemas) {
+        for field in schema
+            .fields()
+            .iter()
+            .filter(|field| is_json_extension_type(field))
+        {
+            if let Some(data_type) = concretized_json_types.get_mut(field.name()) {
+                let mut merged = JsonType::from(&*data_type);
+                merged
+                    .merge(&JsonType::from(field.data_type()))
+                    .context(DataTypeMismatchSnafu)?;
+                *data_type = merged.as_arrow_type();
+            } else {
+                concretized_json_types.insert(field.name().clone(), field.data_type().clone());
+            }
+        }
+    }
+
+    if concretized_json_types.is_empty() {
+        return Ok(base_schema.clone());
+    }
+
+    let mut options = FlatSchemaOptions::from_encoding(metadata.primary_key_encoding);
+    options.concretized_json_types = concretized_json_types;
+    Ok(to_flat_sst_arrow_schema(metadata, &options))
 }
 
 struct MemtableCompactor {
@@ -1175,6 +1222,8 @@ impl MemtableCompactor {
             .map(|p| p.series_count())
             .max()
             .unwrap_or(0);
+
+        let arrow_schema = merge_arrow_schema_for_parts(metadata, arrow_schema, &parts_to_merge)?;
 
         let context = Arc::new(BulkIterContext::new(
             metadata.clone(),
@@ -1406,7 +1455,19 @@ impl MemtableBuilder for BulkMemtableBuilder {
 
 #[cfg(test)]
 mod tests {
+    use datatypes::arrow::array::{
+        ArrayRef, BinaryArray, DictionaryArray, StringViewArray, StructArray,
+        TimestampMillisecondArray, UInt8Array, UInt32Array, UInt64Array,
+    };
+    use datatypes::arrow::datatypes::{
+        DataType as ArrowDataType, Field, Fields, Schema as ArrowSchema, UInt32Type,
+    };
+    use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::ColumnSchema;
+    use datatypes::types::json_type::JsonNativeType;
     use mito_codec::row_converter::build_primary_key_codec;
+    use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
+    use store_api::storage::RegionId;
 
     use super::*;
     use crate::memtable::bulk::part::BulkPartConverter;
@@ -1443,6 +1504,111 @@ mod tests {
 
         converter.append_key_values(&key_values)?;
         converter.convert()
+    }
+
+    fn json2_metadata_for_test() -> RegionMetadataRef {
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(123, 789));
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: api::v1::SemanticType::Timestamp,
+                column_id: 0,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "payload",
+                    ConcreteDataType::json2(JsonNativeType::Null),
+                    true,
+                ),
+                semantic_type: api::v1::SemanticType::Field,
+                column_id: 1,
+            });
+
+        Arc::new(builder.build().unwrap())
+    }
+
+    fn json2_object_type() -> ArrowDataType {
+        ArrowDataType::Struct(Fields::from(vec![
+            Arc::new(Field::new(
+                "commit",
+                ArrowDataType::Struct(Fields::from(vec![
+                    Arc::new(Field::new("collection", ArrowDataType::Utf8View, true)),
+                    Arc::new(Field::new("operation", ArrowDataType::Utf8View, true)),
+                ])),
+                true,
+            )),
+            Arc::new(Field::new("kind", ArrowDataType::Utf8View, true)),
+        ]))
+    }
+
+    fn json2_object_array(collection: &str, operation: &str, kind: &str) -> ArrayRef {
+        let collection: ArrayRef = Arc::new(StringViewArray::from(vec![collection]));
+        let operation: ArrayRef = Arc::new(StringViewArray::from(vec![operation]));
+        let commit: ArrayRef = Arc::new(StructArray::from(vec![
+            (
+                Arc::new(Field::new("collection", ArrowDataType::Utf8View, true)),
+                collection,
+            ),
+            (
+                Arc::new(Field::new("operation", ArrowDataType::Utf8View, true)),
+                operation,
+            ),
+        ]));
+        let kind: ArrayRef = Arc::new(StringViewArray::from(vec![kind]));
+
+        Arc::new(StructArray::from(vec![
+            (
+                Arc::new(Field::new("commit", commit.data_type().clone(), true)),
+                commit,
+            ),
+            (
+                Arc::new(Field::new("kind", ArrowDataType::Utf8View, true)),
+                kind,
+            ),
+        ]))
+    }
+
+    fn create_json2_bulk_part(metadata: &RegionMetadataRef, ts: i64, sequence: u64) -> BulkPart {
+        let base_schema = to_flat_sst_arrow_schema(
+            metadata,
+            &FlatSchemaOptions::from_encoding(metadata.primary_key_encoding),
+        );
+        let mut fields = base_schema.fields().to_vec();
+        let mut payload_field = fields[0].as_ref().clone();
+        payload_field.set_data_type(json2_object_type());
+        fields[0] = Arc::new(payload_field);
+        let schema = Arc::new(ArrowSchema::new_with_metadata(
+            fields,
+            base_schema.metadata().clone(),
+        ));
+
+        let batch = datatypes::arrow::record_batch::RecordBatch::try_new(
+            schema,
+            vec![
+                json2_object_array("repo", "create", "event"),
+                Arc::new(TimestampMillisecondArray::from(vec![ts])) as ArrayRef,
+                Arc::new(DictionaryArray::<UInt32Type>::new(
+                    UInt32Array::from(vec![0]),
+                    Arc::new(BinaryArray::from_iter_values([b"".as_ref()])),
+                )) as ArrayRef,
+                Arc::new(UInt64Array::from(vec![sequence])) as ArrayRef,
+                Arc::new(UInt8Array::from(vec![api::v1::OpType::Put as u8])) as ArrayRef,
+            ],
+        )
+        .unwrap();
+
+        BulkPart {
+            batch,
+            max_timestamp: ts,
+            min_timestamp: ts,
+            sequence,
+            timestamp_index: 1,
+            raw_data: None,
+        }
     }
 
     #[test]
@@ -2262,6 +2428,72 @@ mod tests {
             }
         }
         assert_eq!(expected_rows, total_rows_read);
+    }
+
+    #[test]
+    fn test_bulk_memtable_compact_concretizes_json2_schema() {
+        let metadata = json2_metadata_for_test();
+        let config = BulkMemtableConfig {
+            merge_threshold: 3,
+            encode_row_threshold: usize::MAX,
+            encode_bytes_threshold: usize::MAX,
+            ..Default::default()
+        };
+        let memtable = BulkMemtable::new(
+            2006,
+            config,
+            metadata.clone(),
+            None,
+            None,
+            false,
+            MergeMode::LastRow,
+        );
+        memtable.set_unordered_part_threshold(0);
+
+        memtable
+            .write_bulk(create_json2_bulk_part(&metadata, 1000, 1))
+            .unwrap();
+        memtable
+            .write_bulk(create_json2_bulk_part(&metadata, 2000, 2))
+            .unwrap();
+
+        let mut compactor = memtable.compactor.lock().unwrap();
+        compactor.config.merge_threshold = 2;
+        compactor
+            .merge_parts(
+                &memtable.flat_arrow_schema,
+                &memtable.parts,
+                &metadata,
+                true,
+                MergeMode::LastRow,
+            )
+            .unwrap();
+        drop(compactor);
+
+        let predicate_group = PredicateGroup::new(&metadata, &[]).unwrap();
+        let ranges = memtable
+            .ranges(
+                None,
+                RangesOptions::default().with_predicate(predicate_group),
+            )
+            .unwrap();
+
+        assert_eq!(1, ranges.ranges.len());
+        let total_rows: usize = ranges.ranges.values().map(|r| r.stats().num_rows()).sum();
+        assert_eq!(2, total_rows);
+
+        let total_rows_read: usize = ranges
+            .ranges
+            .values()
+            .map(|range| {
+                range
+                    .build_record_batch_iter(None, None)
+                    .unwrap()
+                    .map(|batch| batch.unwrap().num_rows())
+                    .sum::<usize>()
+            })
+            .sum();
+        assert_eq!(2, total_rows_read);
     }
 
     #[test]

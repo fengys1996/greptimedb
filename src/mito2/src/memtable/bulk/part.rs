@@ -1618,6 +1618,11 @@ impl MultiBulkPart {
         self.batches.iter().map(record_batch_estimated_size).sum()
     }
 
+    /// Returns the schemas of all batches in this part.
+    pub(crate) fn batch_schemas(&self) -> impl Iterator<Item = SchemaRef> + '_ {
+        self.batches.iter().map(|batch| batch.schema_ref().clone())
+    }
+
     /// Reads data from this part with the given context and filters.
     ///
     /// If batch-level statistics are available and a predicate is set, prunes
