@@ -28,10 +28,12 @@ use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
+use arrow_schema::extension::ExtensionType;
 use bloom_filter::creator::BloomFilterIndexer;
 use common_telemetry::{debug, error, info, warn};
 use datatypes::arrow::array::BinaryArray;
 use datatypes::arrow::record_batch::RecordBatch;
+use datatypes::extension::json::JsonExtensionType;
 use mito_codec::index::IndexValuesCodec;
 use mito_codec::row_converter::CompositeValues;
 use object_store::ObjectStore;
@@ -73,7 +75,7 @@ use crate::sst::file::{
 use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::index::fulltext_index::creator::FulltextIndexer;
 use crate::sst::index::intermediate::IntermediateManager;
-use crate::sst::index::inverted_index::creator::InvertedIndexer;
+use crate::sst::index::inverted_index::creator::{InvertedIndexTarget, InvertedIndexer};
 use crate::sst::parquet::SstInfo;
 use crate::sst::parquet::flat_format::primary_key_column_index;
 use crate::sst::parquet::format::PrimaryKeyArray;
@@ -380,10 +382,8 @@ impl IndexerBuilderImpl {
             return None;
         }
 
-        let indexed_column_ids = self.metadata.inverted_indexed_column_ids(
-            self.index_options.inverted_index.ignore_column_ids.iter(),
-        );
-        if indexed_column_ids.is_empty() {
+        let indexed_targets = self.inverted_index_targets();
+        if indexed_targets.is_empty() {
             debug!(
                 "No columns to be indexed, skip creating inverted index, region_id: {}, file_id: {}",
                 self.metadata.region_id, file_id,
@@ -420,10 +420,69 @@ impl IndexerBuilderImpl {
             self.intermediate_manager.clone(),
             self.inverted_index_config.mem_threshold_on_create(),
             segment_row_count,
-            indexed_column_ids,
+            indexed_targets,
         );
 
         Some(indexer)
+    }
+
+    fn inverted_index_targets(&self) -> Vec<InvertedIndexTarget> {
+        let ignored_column_ids = self
+            .index_options
+            .inverted_index
+            .ignore_column_ids
+            .iter()
+            .copied()
+            .collect::<HashSet<_>>();
+
+        let mut targets = self
+            .metadata
+            .inverted_indexed_column_ids(ignored_column_ids.iter())
+            .into_iter()
+            .map(InvertedIndexTarget::column_id)
+            .collect::<Vec<_>>();
+
+        for column in &self.metadata.column_metadatas {
+            if ignored_column_ids.contains(&column.column_id) {
+                continue;
+            }
+
+            let json_extension = match column.column_schema.extension_type::<JsonExtensionType>() {
+                Ok(json_extension) => json_extension,
+                Err(err) => {
+                    warn!(
+                        err;
+                        "Failed to parse JSON extension when building inverted index targets, column: {}",
+                        column.column_schema.name
+                    );
+                    continue;
+                }
+            };
+            let Some(json_extension) = json_extension else {
+                continue;
+            };
+
+            let settings = json_extension
+                .metadata()
+                .json_settings
+                .clone()
+                .unwrap_or_default();
+            targets.extend(
+                settings
+                    .type_hints
+                    .into_iter()
+                    .filter(|hint| hint.inverted_index)
+                    .map(|hint| {
+                        InvertedIndexTarget::column_nested_path(
+                            column.column_id,
+                            hint.path,
+                            hint.data_type,
+                        )
+                    }),
+            );
+        }
+
+        targets
     }
 
     async fn build_fulltext_indexer(&self, file_id: FileId) -> Option<FulltextIndexer> {
@@ -1206,9 +1265,14 @@ mod tests {
     use common_base::readable_size::ReadableSize;
     use datafusion_common::HashMap;
     use datatypes::data_type::ConcreteDataType;
+    use datatypes::extension::json::JsonMetadata;
+    use datatypes::json::{JsonSettings, JsonTypeHint};
     use datatypes::schema::{
-        ColumnSchema, FulltextOptions, SkippingIndexOptions, SkippingIndexType,
+        ColumnDefaultConstraint, ColumnSchema, FulltextOptions, SkippingIndexOptions,
+        SkippingIndexType,
     };
+    use datatypes::types::json_type::{JsonNativeType, JsonObjectType};
+    use index::target::IndexTarget;
     use object_store::ObjectStore;
     use object_store::services::Memory;
     use puffin_manager::PuffinManagerFactory;
@@ -1470,6 +1534,88 @@ mod tests {
         assert!(indexer.inverted_indexer.is_some());
         assert!(indexer.fulltext_indexer.is_some());
         assert!(indexer.bloom_filter_indexer.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_build_indexer_collects_json_type_hint_inverted_targets() {
+        let (dir, factory) = PuffinManagerFactory::new_for_test_async(
+            "test_build_indexer_collects_json_type_hint_inverted_targets_",
+        )
+        .await;
+        let intm_manager = mock_intm_mgr(dir.path().to_string_lossy()).await;
+
+        let settings = JsonSettings::new(vec![
+            JsonTypeHint {
+                path: vec!["host".to_string(), "name".to_string()],
+                data_type: ConcreteDataType::string_datatype(),
+                nullable: true,
+                default_constraint: None,
+                inverted_index: true,
+            },
+            JsonTypeHint {
+                path: vec!["host".to_string(), "region".to_string()],
+                data_type: ConcreteDataType::string_datatype(),
+                nullable: true,
+                default_constraint: Some(ColumnDefaultConstraint::null_value()),
+                inverted_index: false,
+            },
+        ]);
+        let json_type = JsonNativeType::Object(JsonObjectType::from([(
+            "host".to_string(),
+            JsonNativeType::Object(JsonObjectType::from([
+                ("name".to_string(), JsonNativeType::String),
+                ("region".to_string(), JsonNativeType::String),
+            ])),
+        )]));
+        let mut json_column = ColumnSchema::new("attrs", ConcreteDataType::json2(json_type), true);
+        json_column
+            .with_extension_type(&JsonExtensionType::new(Arc::new(JsonMetadata {
+                json_settings: Some(settings),
+            })))
+            .unwrap();
+        let mut metadata_builder = RegionMetadataBuilder::new(RegionId::new(1, 2));
+        metadata_builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: json_column,
+                semantic_type: SemanticType::Field,
+                column_id: 10,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 11,
+            });
+        let metadata = Arc::new(metadata_builder.build().unwrap());
+
+        let builder = IndexerBuilderImpl {
+            build_type: IndexBuildType::Flush,
+            metadata,
+            row_group_size: 1024,
+            puffin_manager: factory.build(mock_object_store(), NoopPathProvider),
+            write_cache_enabled: false,
+            intermediate_manager: intm_manager,
+            index_options: IndexOptions::default(),
+            inverted_index_config: InvertedIndexConfig::default(),
+            fulltext_index_config: FulltextIndexConfig::default(),
+            bloom_filter_index_config: BloomFilterConfig::default(),
+            #[cfg(feature = "vector_index")]
+            vector_index_config: Default::default(),
+        };
+
+        let targets = builder.inverted_index_targets();
+
+        assert_eq!(targets.len(), 1);
+        assert_eq!(
+            targets[0].target,
+            IndexTarget::ColumnNestedPath {
+                column_id: 10,
+                path: vec!["host".to_string(), "name".to_string()],
+            }
+        );
     }
 
     #[tokio::test]
