@@ -47,6 +47,7 @@ impl InvertedIndexApplierBuilder<'_> {
 mod tests {
     use std::collections::HashSet;
 
+    use index::target::IndexTarget;
     use store_api::region_request::PathType;
 
     use super::*;
@@ -74,7 +75,7 @@ mod tests {
             .collect_regex_match(&tag_column(), &string_lit("abc"))
             .unwrap();
 
-        let predicates = builder.output.get(&1).unwrap();
+        let predicates = builder.output.get(&IndexTarget::ColumnId(1)).unwrap();
         assert_eq!(predicates.len(), 1);
         assert_eq!(
             predicates[0],
@@ -102,7 +103,7 @@ mod tests {
             .collect_regex_match(&field_column(), &string_lit("abc"))
             .unwrap();
 
-        let predicates = builder.output.get(&3).unwrap();
+        let predicates = builder.output.get(&IndexTarget::ColumnId(3)).unwrap();
         assert_eq!(predicates.len(), 1);
         assert_eq!(
             predicates[0],

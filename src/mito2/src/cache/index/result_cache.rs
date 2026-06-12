@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 use index::bloom_filter::applier::InListPredicate;
 use index::inverted_index::search::predicate::{Predicate, RangePredicate};
+use index::target::IndexTarget;
 use moka::notification::RemovalCause;
 use moka::sync::Cache;
 use store_api::storage::{ColumnId, FileId};
@@ -132,7 +133,7 @@ impl PredicateKey {
     }
 
     /// Creates a new inverted index key.
-    pub fn new_inverted(predicates: Arc<BTreeMap<ColumnId, Vec<Predicate>>>) -> Self {
+    pub fn new_inverted(predicates: Arc<BTreeMap<IndexTarget, Vec<Predicate>>>) -> Self {
         Self::Inverted(InvertedIndexKey::new(predicates))
     }
 
@@ -216,27 +217,28 @@ impl BloomFilterKey {
 /// Key for inverted index queries.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct InvertedIndexKey {
-    predicates: Arc<BTreeMap<ColumnId, Vec<Predicate>>>,
+    predicates: Arc<BTreeMap<IndexTarget, Vec<Predicate>>>,
     mem_usage: usize,
 }
 
 impl InvertedIndexKey {
     /// Creates a new inverted index key with the given predicates.
     /// Calculates memory usage based on the type and size of predicates.
-    pub fn new(predicates: Arc<BTreeMap<ColumnId, Vec<Predicate>>>) -> Self {
+    pub fn new(predicates: Arc<BTreeMap<IndexTarget, Vec<Predicate>>>) -> Self {
         let mem_usage = predicates
-            .values()
-            .map(|predicates| {
-                predicates
-                    .iter()
-                    .map(|predicate| match predicate {
-                        Predicate::InList(predicate) => {
-                            predicate.list.iter().map(|list| list.len()).sum::<usize>()
-                        }
-                        Predicate::Range(_) => size_of::<RangePredicate>(),
-                        Predicate::RegexMatch(predicate) => predicate.pattern.len(),
-                    })
-                    .sum::<usize>()
+            .iter()
+            .map(|(target, predicates)| {
+                target.encode().len()
+                    + predicates
+                        .iter()
+                        .map(|predicate| match predicate {
+                            Predicate::InList(predicate) => {
+                                predicate.list.iter().map(|list| list.len()).sum::<usize>()
+                            }
+                            Predicate::Range(_) => size_of::<RangePredicate>(),
+                            Predicate::RegexMatch(predicate) => predicate.pattern.len(),
+                        })
+                        .sum::<usize>()
             })
             .sum();
 
@@ -467,7 +469,7 @@ mod tests {
                 upper: None,
             },
         });
-        predicates3.insert(1, vec![predicate3]);
+        predicates3.insert(IndexTarget::ColumnId(1), vec![predicate3]);
         let key3 = PredicateKey::new_inverted(Arc::new(predicates3));
         let selection3 = Arc::new(RowGroupSelection::from_row_ranges(
             vec![(0, vec![5..15])],
@@ -480,5 +482,36 @@ mod tests {
             weight3,
             key3.mem_usage() as u32 + selection3.mem_usage() as u32
         );
+    }
+
+    #[test]
+    fn test_inverted_index_key_distinguishes_nested_paths() {
+        let predicate = Predicate::Range(RangePredicate {
+            range: Range {
+                lower: None,
+                upper: None,
+            },
+        });
+
+        let mut predicates1 = BTreeMap::new();
+        predicates1.insert(
+            IndexTarget::ColumnNestedPath {
+                column_id: 1,
+                path: vec!["a".to_string(), "b".to_string()],
+            },
+            vec![predicate.clone()],
+        );
+        let mut predicates2 = BTreeMap::new();
+        predicates2.insert(
+            IndexTarget::ColumnNestedPath {
+                column_id: 1,
+                path: vec!["a".to_string(), "c".to_string()],
+            },
+            vec![predicate],
+        );
+
+        let key1 = PredicateKey::new_inverted(Arc::new(predicates1));
+        let key2 = PredicateKey::new_inverted(Arc::new(predicates2));
+        assert_ne!(key1, key2);
     }
 }

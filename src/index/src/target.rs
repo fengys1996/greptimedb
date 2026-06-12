@@ -25,7 +25,7 @@ use snafu::{Snafu, ensure};
 use store_api::storage::ColumnId;
 
 /// Describes an index target.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum IndexTarget {
     ColumnId(ColumnId),
     ColumnNestedPath {

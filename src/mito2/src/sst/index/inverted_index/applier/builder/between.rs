@@ -25,10 +25,7 @@ impl InvertedIndexApplierBuilder<'_> {
             return Ok(());
         }
 
-        let Some(column_name) = Self::column_name(&between.expr) else {
-            return Ok(());
-        };
-        let Some((column_id, data_type)) = self.column_id_and_type(column_name)? else {
+        let Some((target, data_type)) = self.indexed_expr_target(&between.expr)? else {
             return Ok(());
         };
         let Some(low) = Self::nonnull_lit(&between.low) else {
@@ -51,7 +48,7 @@ impl InvertedIndexApplierBuilder<'_> {
             },
         });
 
-        self.add_predicate(column_id, predicate);
+        self.add_target_predicate(target, predicate);
         Ok(())
     }
 }
@@ -60,6 +57,7 @@ impl InvertedIndexApplierBuilder<'_> {
 mod tests {
     use std::collections::HashSet;
 
+    use index::target::IndexTarget;
     use store_api::region_request::PathType;
 
     use super::*;
@@ -92,7 +90,7 @@ mod tests {
 
         builder.collect_between(&between).unwrap();
 
-        let predicates = builder.output.get(&1).unwrap();
+        let predicates = builder.output.get(&IndexTarget::ColumnId(1)).unwrap();
         assert_eq!(predicates.len(), 1);
         assert_eq!(
             predicates[0],
@@ -159,7 +157,7 @@ mod tests {
 
         builder.collect_between(&between).unwrap();
 
-        let predicates = builder.output.get(&3).unwrap();
+        let predicates = builder.output.get(&IndexTarget::ColumnId(3)).unwrap();
         assert_eq!(predicates.len(), 1);
         assert_eq!(
             predicates[0],

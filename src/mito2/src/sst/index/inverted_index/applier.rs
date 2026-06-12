@@ -33,7 +33,6 @@ use puffin::puffin_manager::{PuffinManager, PuffinReader};
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_request::PathType;
-use store_api::storage::ColumnId;
 
 use crate::access_layer::{RegionFilePathFactory, WriteCachePathProvider};
 use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
@@ -135,13 +134,13 @@ pub(crate) struct InvertedIndexApplier {
     puffin_metadata_cache: Option<PuffinMetadataCacheRef>,
 
     /// All collected predicates.
-    predicates: BTreeMap<ColumnId, Vec<Predicate>>,
+    predicates: BTreeMap<IndexTarget, Vec<Predicate>>,
 
     /// Default apply plan built from all collected predicates.
     default_plan: SstApplyPlan,
 
     /// Expected predicate column types from the latest region metadata.
-    expected_predicate_col_types: BTreeMap<ColumnId, ConcreteDataType>,
+    expected_predicate_col_types: BTreeMap<IndexTarget, ConcreteDataType>,
 }
 
 pub(crate) type InvertedIndexApplierRef = Arc<InvertedIndexApplier>;
@@ -159,8 +158,8 @@ impl InvertedIndexApplier {
         path_type: PathType,
         store: ObjectStore,
         puffin_manager_factory: PuffinManagerFactory,
-        predicates: BTreeMap<ColumnId, Vec<Predicate>>,
-        expected_predicate_col_types: BTreeMap<ColumnId, ConcreteDataType>,
+        predicates: BTreeMap<IndexTarget, Vec<Predicate>>,
+        expected_predicate_col_types: BTreeMap<IndexTarget, ConcreteDataType>,
     ) -> Result<Self> {
         let default_plan = Self::build_apply_plan(&predicates)?;
         INDEX_APPLY_MEMORY_USAGE.add(default_plan.index_applier.memory_usage() as i64);
@@ -367,16 +366,17 @@ impl InvertedIndexApplier {
         let mut compatible_predicates = BTreeMap::new();
         let mut has_type_mismatch = false;
 
-        for (col_id, expected) in &self.expected_predicate_col_types {
-            if let Some(sst_col) = sst_metadata.column_by_id(*col_id)
+        for (target, expected) in &self.expected_predicate_col_types {
+            let col_id = target.column_id();
+            if let Some(sst_col) = sst_metadata.column_by_id(col_id)
                 && sst_col.column_schema.data_type != *expected
             {
                 has_type_mismatch = true;
                 continue;
             }
 
-            if let Some(predicates) = self.predicates.get(col_id) {
-                compatible_predicates.insert(*col_id, predicates.clone());
+            if let Some(predicates) = self.predicates.get(target) {
+                compatible_predicates.insert(target.clone(), predicates.clone());
             }
         }
 
@@ -393,17 +393,17 @@ impl InvertedIndexApplier {
     }
 
     fn build_apply_plan(
-        predicates_by_col: &BTreeMap<ColumnId, Vec<Predicate>>,
+        predicates_by_target: &BTreeMap<IndexTarget, Vec<Predicate>>,
     ) -> Result<SstApplyPlan> {
-        let predicates = predicates_by_col
+        let predicates = predicates_by_target
             .iter()
-            .map(|(col_id, preds)| (format!("{}", IndexTarget::ColumnId(*col_id)), preds.clone()))
+            .map(|(target, preds)| (target.encode(), preds.clone()))
             .collect();
 
         let index_applier =
             PredicatesIndexApplier::try_from(predicates).context(BuildIndexApplierSnafu)?;
 
-        let predicate_key = PredicateKey::new_inverted(Arc::new(predicates_by_col.clone()));
+        let predicate_key = PredicateKey::new_inverted(Arc::new(predicates_by_target.clone()));
         Ok(SstApplyPlan {
             predicate_key,
             index_applier: Arc::new(index_applier),
@@ -441,13 +441,15 @@ mod tests {
 
         let mut predicates = BTreeMap::new();
         predicates.insert(
-            1,
+            IndexTarget::ColumnId(1),
             vec![Predicate::RegexMatch(RegexMatchPredicate {
                 pattern: "foo".to_string(),
             })],
         );
-        let expected_predicate_col_types =
-            BTreeMap::from_iter([(1, ConcreteDataType::string_datatype())]);
+        let expected_predicate_col_types = BTreeMap::from_iter([(
+            IndexTarget::ColumnId(1),
+            ConcreteDataType::string_datatype(),
+        )]);
 
         let sst_index_applier = InvertedIndexApplier::new(
             table_dir,
@@ -473,14 +475,14 @@ mod tests {
 
         let mut predicates = BTreeMap::new();
         predicates.insert(
-            1,
+            IndexTarget::ColumnId(1),
             vec![Predicate::RegexMatch(RegexMatchPredicate {
                 pattern: "foo".to_string(),
             })],
         );
         // Column id 1 is String in `mock_region_metadata`, set expected type to Int64.
         let expected_predicate_col_types =
-            BTreeMap::from_iter([(1, ConcreteDataType::int64_datatype())]);
+            BTreeMap::from_iter([(IndexTarget::ColumnId(1), ConcreteDataType::int64_datatype())]);
 
         let sst_index_applier = InvertedIndexApplier::new(
             table_dir,
@@ -495,6 +497,41 @@ mod tests {
             .plan_for_sst(&mock_region_metadata())
             .unwrap();
         assert!(plan.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_plan_for_sst_nested_target_checks_root_type() {
+        let (_d, puffin_manager_factory) =
+            PuffinManagerFactory::new_for_test_async("test_plan_for_sst_nested_target_").await;
+        let object_store = ObjectStore::new(Memory::default()).unwrap().finish();
+        let table_dir = "table_dir".to_string();
+        let target = IndexTarget::ColumnNestedPath {
+            column_id: 3,
+            path: vec!["host".to_string(), "name".to_string()],
+        };
+
+        let predicates = BTreeMap::from_iter([(
+            target.clone(),
+            vec![Predicate::RegexMatch(RegexMatchPredicate {
+                pattern: "foo".to_string(),
+            })],
+        )]);
+        let expected_predicate_col_types =
+            BTreeMap::from_iter([(target, ConcreteDataType::json_datatype())]);
+
+        let sst_index_applier = InvertedIndexApplier::new(
+            table_dir,
+            PathType::Bare,
+            object_store,
+            puffin_manager_factory,
+            predicates,
+            expected_predicate_col_types,
+        )
+        .unwrap();
+        let plan = sst_index_applier
+            .plan_for_sst(&mock_region_metadata())
+            .unwrap();
+        assert!(plan.is_some());
     }
 
     #[tokio::test]
@@ -525,13 +562,15 @@ mod tests {
 
         let mut predicates = BTreeMap::new();
         predicates.insert(
-            1,
+            IndexTarget::ColumnId(1),
             vec![Predicate::RegexMatch(RegexMatchPredicate {
                 pattern: "foo".to_string(),
             })],
         );
-        let expected_predicate_col_types =
-            BTreeMap::from_iter([(1, ConcreteDataType::string_datatype())]);
+        let expected_predicate_col_types = BTreeMap::from_iter([(
+            IndexTarget::ColumnId(1),
+            ConcreteDataType::string_datatype(),
+        )]);
         let sst_index_applier = InvertedIndexApplier::new(
             table_dir.clone(),
             PathType::Bare,
@@ -567,6 +606,11 @@ mod tests {
                 ),
                 semantic_type: SemanticType::Timestamp,
                 column_id: 2,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("attrs", ConcreteDataType::json_datatype(), true),
+                semantic_type: SemanticType::Field,
+                column_id: 3,
             })
             .primary_key(vec![1]);
         Arc::new(builder.build().unwrap())

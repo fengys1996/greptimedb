@@ -29,33 +29,43 @@ impl InvertedIndexApplierBuilder<'_> {
         op: &Operator,
         right: &DfExpr,
     ) -> Result<()> {
+        let left_is_target = self.indexed_expr_target(left)?.is_some();
+        let right_is_target = self.indexed_expr_target(right)?.is_some();
         match op {
             Operator::Lt => {
-                if matches!(right, DfExpr::Column(_)) {
+                if right_is_target {
                     self.collect_column_gt_lit(right, left)
-                } else {
+                } else if left_is_target {
                     self.collect_column_lt_lit(left, right)
+                } else {
+                    Ok(())
                 }
             }
             Operator::LtEq => {
-                if matches!(right, DfExpr::Column(_)) {
+                if right_is_target {
                     self.collect_column_ge_lit(right, left)
-                } else {
+                } else if left_is_target {
                     self.collect_column_le_lit(left, right)
+                } else {
+                    Ok(())
                 }
             }
             Operator::Gt => {
-                if matches!(right, DfExpr::Column(_)) {
+                if right_is_target {
                     self.collect_column_lt_lit(right, left)
-                } else {
+                } else if left_is_target {
                     self.collect_column_gt_lit(left, right)
+                } else {
+                    Ok(())
                 }
             }
             Operator::GtEq => {
-                if matches!(right, DfExpr::Column(_)) {
+                if right_is_target {
                     self.collect_column_le_lit(right, left)
-                } else {
+                } else if left_is_target {
                     self.collect_column_ge_lit(left, right)
+                } else {
+                    Ok(())
                 }
             }
             _ => Ok(()),
@@ -108,13 +118,10 @@ impl InvertedIndexApplierBuilder<'_> {
         literal: &DfExpr,
         range_builder: impl FnOnce(Bytes) -> Range,
     ) -> Result<()> {
-        let Some(column_name) = Self::column_name(column) else {
-            return Ok(());
-        };
         let Some(lit) = Self::nonnull_lit(literal) else {
             return Ok(());
         };
-        let Some((column_id, data_type)) = self.column_id_and_type(column_name)? else {
+        let Some((target, data_type)) = self.indexed_expr_target(column)? else {
             return Ok(());
         };
 
@@ -122,7 +129,7 @@ impl InvertedIndexApplierBuilder<'_> {
             range: range_builder(Self::encode_lit(lit, data_type)?),
         });
 
-        self.add_predicate(column_id, predicate);
+        self.add_target_predicate(target, predicate);
         Ok(())
     }
 }
@@ -132,6 +139,7 @@ mod tests {
 
     use std::collections::HashSet;
 
+    use index::target::IndexTarget;
     use store_api::region_request::PathType;
 
     use super::*;
@@ -243,7 +251,7 @@ mod tests {
             builder.collect_comparison_expr(left, op, right).unwrap();
         }
 
-        let predicates = builder.output.get(&1).unwrap();
+        let predicates = builder.output.get(&IndexTarget::ColumnId(1)).unwrap();
         assert_eq!(predicates.len(), cases.len());
         for ((_, expected), actual) in cases.into_iter().zip(predicates) {
             assert_eq!(
@@ -290,7 +298,7 @@ mod tests {
             .collect_comparison_expr(&field_column(), &Operator::Lt, &string_lit("abc"))
             .unwrap();
 
-        let predicates = builder.output.get(&3).unwrap();
+        let predicates = builder.output.get(&IndexTarget::ColumnId(3)).unwrap();
         assert_eq!(predicates.len(), 1);
         assert_eq!(
             predicates[0],

@@ -655,21 +655,27 @@ impl ScanRegion {
 
         let puffin_metadata_cache = self.cache_strategy.puffin_metadata_cache().cloned();
 
+        let ignored_column_ids = self
+            .version
+            .options
+            .index_options
+            .inverted_index
+            .ignore_column_ids
+            .iter()
+            .copied()
+            .collect::<HashSet<_>>();
+
         InvertedIndexApplierBuilder::new(
             self.access_layer.table_dir().to_string(),
             self.access_layer.path_type(),
             self.access_layer.object_store().clone(),
             self.version.metadata.as_ref(),
-            self.version.metadata.inverted_indexed_column_ids(
-                self.version
-                    .options
-                    .index_options
-                    .inverted_index
-                    .ignore_column_ids
-                    .iter(),
-            ),
+            self.version
+                .metadata
+                .inverted_indexed_column_ids(ignored_column_ids.iter()),
             self.access_layer.puffin_manager_factory().clone(),
         )
+        .with_ignored_column_ids(ignored_column_ids)
         .with_file_cache(file_cache)
         .with_inverted_index_cache(inverted_index_cache)
         .with_puffin_metadata_cache(puffin_metadata_cache)
