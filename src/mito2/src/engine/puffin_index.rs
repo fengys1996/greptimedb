@@ -48,6 +48,8 @@ const TARGET_TYPE_UNKNOWN: &str = "unknown";
 
 const TARGET_TYPE_COLUMN: &str = "column";
 
+const TARGET_TYPE_COLUMN_NESTED_PATH: &str = "column_nested_path";
+
 pub(crate) struct IndexEntryContext<'a> {
     pub(crate) table_dir: &'a str,
     pub(crate) index_file_path: &'a str,
@@ -368,10 +370,43 @@ fn decode_target_info(target_key: &str) -> (String, String) {
             TARGET_TYPE_COLUMN.to_string(),
             json!({ "column": id }).to_string(),
         ),
+        Ok(IndexTarget::ColumnNestedPath { column_id, path }) => (
+            TARGET_TYPE_COLUMN_NESTED_PATH.to_string(),
+            json!({ "column": column_id, "path": path }).to_string(),
+        ),
         _ => (
             TARGET_TYPE_UNKNOWN.to_string(),
             json!({ "error": "failed_to_decode" }).to_string(),
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_decode_target_info_column() {
+        let (target_type, target_json) = decode_target_info("1");
+
+        assert_eq!(TARGET_TYPE_COLUMN, target_type);
+        assert_eq!(r#"{"column":1}"#, target_json);
+    }
+
+    #[test]
+    fn test_decode_target_info_column_nested_path() {
+        let (target_type, target_json) = decode_target_info("2:WyJkYXkiXQ");
+
+        assert_eq!(TARGET_TYPE_COLUMN_NESTED_PATH, target_type);
+        assert_eq!(r#"{"column":2,"path":["day"]}"#, target_json);
+    }
+
+    #[test]
+    fn test_decode_target_info_invalid_key() {
+        let (target_type, target_json) = decode_target_info("invalid");
+
+        assert_eq!(TARGET_TYPE_UNKNOWN, target_type);
+        assert_eq!(r#"{"error":"failed_to_decode"}"#, target_json);
     }
 }
 
