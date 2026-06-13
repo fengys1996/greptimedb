@@ -22,7 +22,10 @@ use std::time::Instant;
 
 use bytes::Bytes;
 use common_telemetry::{debug, error, info};
-use datatypes::arrow::datatypes::SchemaRef;
+use datatypes::arrow::datatypes::{DataType as ArrowDataType, SchemaRef};
+use datatypes::data_type::DataType;
+use datatypes::extension::json::is_json_extension_type;
+use datatypes::types::JsonType;
 use partition::expr::PartitionExpr;
 use smallvec::{SmallVec, smallvec};
 use snafu::ResultExt;
@@ -38,8 +41,8 @@ use crate::cache::CacheManagerRef;
 use crate::config::MitoConfig;
 use crate::engine::region_hook::SstFileInfo;
 use crate::error::{
-    Error, FlushRegionSnafu, JoinSnafu, RegionClosedSnafu, RegionDroppedSnafu,
-    RegionTruncatedSnafu, Result,
+    DataTypeMismatchSnafu, Error, FlushRegionSnafu, JoinSnafu, RegionClosedSnafu,
+    RegionDroppedSnafu, RegionTruncatedSnafu, Result,
 };
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::memtable::bulk::ENCODE_ROW_THRESHOLD;
@@ -589,10 +592,7 @@ impl RegionFlushTask {
         write_opts: &WriteOptions,
         mem_ranges: MemtableRanges,
     ) -> Result<FlushFlatMemResult> {
-        let batch_schema = to_flat_sst_arrow_schema(
-            &version.metadata,
-            &FlatSchemaOptions::from_encoding(version.metadata.primary_key_encoding),
-        );
+        let batch_schema = flush_batch_schema(&version.metadata, &mem_ranges)?;
         let field_column_start =
             flat_format::field_column_start(&version.metadata, batch_schema.fields().len());
         let flat_sources = memtable_flat_sources(
@@ -750,6 +750,39 @@ struct DoFlushMemtablesResult {
 struct FlatSources {
     sources: SmallVec<[(FlatSource, SequenceNumber); 4]>,
     encoded: SmallVec<[(EncodedRange, SequenceNumber); 4]>,
+}
+
+fn flush_batch_schema(
+    metadata: &store_api::metadata::RegionMetadataRef,
+    mem_ranges: &MemtableRanges,
+) -> Result<SchemaRef> {
+    let mut concretized_json_types = HashMap::<String, ArrowDataType>::new();
+
+    for schema in mem_ranges
+        .ranges
+        .values()
+        .filter_map(|range| range.record_batch_schema())
+    {
+        for field in schema
+            .fields()
+            .iter()
+            .filter(|field| is_json_extension_type(field))
+        {
+            if let Some(data_type) = concretized_json_types.get_mut(field.name()) {
+                let mut merged = JsonType::from(&*data_type);
+                merged
+                    .merge(&JsonType::from(field.data_type()))
+                    .context(DataTypeMismatchSnafu)?;
+                *data_type = merged.as_arrow_type();
+            } else {
+                concretized_json_types.insert(field.name().clone(), field.data_type().clone());
+            }
+        }
+    }
+
+    let mut options = FlatSchemaOptions::from_encoding(metadata.primary_key_encoding);
+    options.concretized_json_types = concretized_json_types;
+    Ok(to_flat_sst_arrow_schema(metadata, &options))
 }
 
 /// Returns the max sequence and [FlatSource] for the given memtable.
@@ -1287,18 +1320,142 @@ impl FlushStatus {
 
 #[cfg(test)]
 mod tests {
+    use datatypes::arrow::array::{
+        ArrayRef, BinaryArray, DictionaryArray, StringViewArray, StructArray,
+        TimestampMillisecondArray, UInt8Array, UInt32Array, UInt64Array,
+    };
+    use datatypes::arrow::datatypes::{
+        DataType as ArrowDataType, Field, Fields, Schema as ArrowSchema, UInt32Type,
+    };
+    use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::ColumnSchema;
+    use datatypes::types::json_type::JsonNativeType;
     use mito_codec::row_converter::build_primary_key_codec;
+    use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use tokio::sync::oneshot;
 
     use super::*;
     use crate::cache::CacheManager;
     use crate::memtable::bulk::part::BulkPartConverter;
     use crate::memtable::time_series::TimeSeriesMemtableBuilder;
-    use crate::memtable::{Memtable, RangesOptions};
+    use crate::memtable::{BulkPart, Memtable, RangesOptions};
     use crate::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
     use crate::test_util::memtable_util::{build_key_values_with_ts_seq_values, metadata_for_test};
     use crate::test_util::scheduler_util::{SchedulerEnv, VecScheduler};
     use crate::test_util::version_util::{VersionControlBuilder, write_rows_to_version};
+
+    fn json2_metadata_for_flush_test() -> store_api::metadata::RegionMetadataRef {
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(123, 789));
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: api::v1::SemanticType::Timestamp,
+                column_id: 0,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "payload",
+                    ConcreteDataType::json2(JsonNativeType::Null),
+                    true,
+                ),
+                semantic_type: api::v1::SemanticType::Field,
+                column_id: 1,
+            });
+
+        Arc::new(builder.build().unwrap())
+    }
+
+    fn json2_object_type_for_flush_test() -> ArrowDataType {
+        ArrowDataType::Struct(Fields::from(vec![
+            Arc::new(Field::new(
+                "commit",
+                ArrowDataType::Struct(Fields::from(vec![
+                    Arc::new(Field::new("collection", ArrowDataType::Utf8View, true)),
+                    Arc::new(Field::new("operation", ArrowDataType::Utf8View, true)),
+                ])),
+                true,
+            )),
+            Arc::new(Field::new("kind", ArrowDataType::Utf8View, true)),
+        ]))
+    }
+
+    fn json2_object_array_for_flush_test(
+        collection: &str,
+        operation: &str,
+        kind: &str,
+    ) -> ArrayRef {
+        let collection: ArrayRef = Arc::new(StringViewArray::from(vec![collection]));
+        let operation: ArrayRef = Arc::new(StringViewArray::from(vec![operation]));
+        let commit: ArrayRef = Arc::new(StructArray::from(vec![
+            (
+                Arc::new(Field::new("collection", ArrowDataType::Utf8View, true)),
+                collection,
+            ),
+            (
+                Arc::new(Field::new("operation", ArrowDataType::Utf8View, true)),
+                operation,
+            ),
+        ]));
+        let kind: ArrayRef = Arc::new(StringViewArray::from(vec![kind]));
+
+        Arc::new(StructArray::from(vec![
+            (
+                Arc::new(Field::new("commit", commit.data_type().clone(), true)),
+                commit,
+            ),
+            (
+                Arc::new(Field::new("kind", ArrowDataType::Utf8View, true)),
+                kind,
+            ),
+        ]))
+    }
+
+    fn create_json2_flush_bulk_part(
+        metadata: &store_api::metadata::RegionMetadataRef,
+        ts: i64,
+        sequence: u64,
+    ) -> BulkPart {
+        let base_schema = to_flat_sst_arrow_schema(
+            metadata,
+            &FlatSchemaOptions::from_encoding(metadata.primary_key_encoding),
+        );
+        let mut fields = base_schema.fields().to_vec();
+        let mut payload_field = fields[0].as_ref().clone();
+        payload_field.set_data_type(json2_object_type_for_flush_test());
+        fields[0] = Arc::new(payload_field);
+        let schema = Arc::new(ArrowSchema::new_with_metadata(
+            fields,
+            base_schema.metadata().clone(),
+        ));
+
+        let batch = datatypes::arrow::record_batch::RecordBatch::try_new(
+            schema,
+            vec![
+                json2_object_array_for_flush_test("repo", "create", "event"),
+                Arc::new(TimestampMillisecondArray::from(vec![ts])) as ArrayRef,
+                Arc::new(DictionaryArray::<UInt32Type>::new(
+                    UInt32Array::from(vec![0]),
+                    Arc::new(BinaryArray::from_iter_values([b"".as_ref()])),
+                )) as ArrayRef,
+                Arc::new(UInt64Array::from(vec![sequence])) as ArrayRef,
+                Arc::new(UInt8Array::from(vec![api::v1::OpType::Put as u8])) as ArrayRef,
+            ],
+        )
+        .unwrap();
+
+        BulkPart {
+            batch,
+            max_timestamp: ts,
+            min_timestamp: ts,
+            sequence,
+            timestamp_index: 1,
+            raw_data: None,
+        }
+    }
 
     #[test]
     fn test_get_mutable_limit() {
@@ -1587,6 +1744,59 @@ mod tests {
             }
             assert_eq!(2, total_rows, "append_mode should preserve duplicates");
         }
+    }
+
+    #[test]
+    fn test_memtable_flat_sources_concretizes_json2_schema() {
+        let metadata = json2_metadata_for_flush_test();
+        let memtable = crate::memtable::bulk::BulkMemtable::new(
+            1,
+            crate::memtable::bulk::BulkMemtableConfig {
+                merge_threshold: 3,
+                ..Default::default()
+            },
+            metadata.clone(),
+            None,
+            None,
+            true,
+            MergeMode::LastRow,
+        );
+        memtable.set_unordered_part_threshold(0);
+
+        memtable
+            .write_bulk(create_json2_flush_bulk_part(&metadata, 1000, 1))
+            .unwrap();
+        memtable
+            .write_bulk(create_json2_flush_bulk_part(&metadata, 2000, 2))
+            .unwrap();
+
+        let mem_ranges = memtable.ranges(None, RangesOptions::for_flush()).unwrap();
+        assert_eq!(2, mem_ranges.ranges.len());
+
+        let schema = flush_batch_schema(&metadata, &mem_ranges).unwrap();
+        let options = RegionOptions {
+            append_mode: true,
+            ..Default::default()
+        };
+        let flat_sources = memtable_flat_sources(
+            schema.clone(),
+            mem_ranges,
+            &options,
+            flat_format::field_column_start(&metadata, schema.fields().len()),
+        )
+        .unwrap();
+
+        assert!(flat_sources.encoded.is_empty());
+        assert_eq!(1, flat_sources.sources.len());
+
+        let mut total_rows = 0usize;
+        for (source, _sequence) in flat_sources.sources {
+            total_rows += source
+                .take_iter()
+                .map(|batch| batch.unwrap().num_rows())
+                .sum::<usize>();
+        }
+        assert_eq!(2, total_rows);
     }
 
     #[tokio::test]

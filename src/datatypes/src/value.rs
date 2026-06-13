@@ -1136,7 +1136,7 @@ impl TryFrom<ScalarValue> for Value {
             ScalarValue::UInt16(u) => Value::from(u),
             ScalarValue::UInt32(u) => Value::from(u),
             ScalarValue::UInt64(u) => Value::from(u),
-            ScalarValue::Utf8(s) | ScalarValue::LargeUtf8(s) => {
+            ScalarValue::Utf8(s) | ScalarValue::LargeUtf8(s) | ScalarValue::Utf8View(s) => {
                 Value::from(s.map(StringBytes::from))
             }
             ScalarValue::Binary(b)
@@ -1226,7 +1226,6 @@ impl TryFrom<ScalarValue> for Value {
             | ScalarValue::Dictionary(_, _)
             | ScalarValue::Union(_, _, _)
             | ScalarValue::Float16(_)
-            | ScalarValue::Utf8View(_)
             | ScalarValue::BinaryView(_)
             | ScalarValue::Map(_)
             | ScalarValue::Date64(_)
@@ -1895,6 +1894,13 @@ pub(crate) mod tests {
             Value::Null,
             ScalarValue::LargeUtf8(None).try_into().unwrap()
         );
+        assert_eq!(
+            Value::from("view_hello"),
+            ScalarValue::Utf8View(Some("view_hello".to_string()))
+                .try_into()
+                .unwrap()
+        );
+        assert_eq!(Value::Null, ScalarValue::Utf8View(None).try_into().unwrap());
 
         assert_eq!(
             Value::from("world".as_bytes()),

@@ -23,6 +23,7 @@ use std::time::Duration;
 pub use bulk::part::EncodedBulkPart;
 use bytes::Bytes;
 use common_time::Timestamp;
+use datatypes::arrow::datatypes::SchemaRef;
 use datatypes::arrow::record_batch::RecordBatch;
 use mito_codec::key_values::KeyValue;
 pub use mito_codec::key_values::KeyValues;
@@ -541,6 +542,11 @@ pub trait IterBuilder: Send + Sync {
         false
     }
 
+    /// Returns the schema of record batches produced by this builder, if known.
+    fn record_batch_schema(&self) -> Option<SchemaRef> {
+        None
+    }
+
     /// Returns the record batch iterator to read the range.
     /// ## Note
     /// Implementations should ensure the iterator yields data within given time range.
@@ -732,6 +738,11 @@ impl MemtableRange {
     /// Returns whether the iterator is a record batch iterator.
     pub fn is_record_batch(&self) -> bool {
         self.context.builder.is_record_batch()
+    }
+
+    /// Returns the schema of record batches produced by this range, if known.
+    pub fn record_batch_schema(&self) -> Option<SchemaRef> {
+        self.context.builder.record_batch_schema()
     }
 
     pub fn num_rows(&self) -> usize {

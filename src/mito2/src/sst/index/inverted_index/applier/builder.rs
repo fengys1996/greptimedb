@@ -475,6 +475,10 @@ mod tests {
         s.into().lit()
     }
 
+    pub(crate) fn utf8_view_lit(s: impl Into<String>) -> Expr {
+        Expr::Literal(ScalarValue::Utf8View(Some(s.into())), None)
+    }
+
     pub(crate) fn int64_lit(i: impl Into<i64>) -> Expr {
         i.into().lit()
     }
@@ -581,6 +585,39 @@ mod tests {
 
         builder
             .collect_eq(&json_get_expr("host.name"), &string_lit("greptime"))
+            .unwrap();
+
+        let target = IndexTarget::ColumnNestedPath {
+            column_id: 5,
+            path: vec!["host".to_string(), "name".to_string()],
+        };
+        let predicates = builder.output.get(&target).unwrap();
+        assert_eq!(predicates.len(), 1);
+        assert_eq!(
+            predicates[0],
+            Predicate::InList(InListPredicate {
+                list: BTreeSet::from_iter([encoded_string("greptime")])
+            })
+        );
+    }
+
+    #[test]
+    fn test_collect_json_get_eq_utf8_view() {
+        let (_d, factory) =
+            PuffinManagerFactory::new_for_test_block("test_collect_json_get_eq_utf8_view_");
+
+        let metadata = test_region_metadata();
+        let mut builder = InvertedIndexApplierBuilder::new(
+            "test".to_string(),
+            PathType::Bare,
+            test_object_store(),
+            &metadata,
+            HashSet::from_iter([1, 2, 3]),
+            factory,
+        );
+
+        builder
+            .collect_eq(&json_get_expr("host.name"), &utf8_view_lit("greptime"))
             .unwrap();
 
         let target = IndexTarget::ColumnNestedPath {

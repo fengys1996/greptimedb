@@ -814,6 +814,10 @@ impl IterBuilder for BulkRangeIterBuilder {
         true
     }
 
+    fn record_batch_schema(&self) -> Option<SchemaRef> {
+        Some(self.part.batch.schema_ref().clone())
+    }
+
     fn build_record_batch(
         &self,
         _time_range: Option<(Timestamp, Timestamp)>,
@@ -851,6 +855,10 @@ impl IterBuilder for MultiBulkRangeIterBuilder {
 
     fn is_record_batch(&self) -> bool {
         true
+    }
+
+    fn record_batch_schema(&self) -> Option<SchemaRef> {
+        self.part.schema()
     }
 
     fn build_record_batch(

@@ -15,6 +15,7 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
+use datatypes::schema::ext::ArrowSchemaExt;
 use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::{
     ArrowReaderMetadata, ArrowReaderOptions, ParquetRecordBatchReader,
@@ -43,8 +44,15 @@ impl MemtableRowGroupReaderBuilder {
         data: Bytes,
     ) -> error::Result<Self> {
         // Create ArrowReaderMetadata for building the reader.
-        let arrow_reader_options =
-            ArrowReaderOptions::new().with_schema(context.read_format().arrow_schema().clone());
+        let mut arrow_reader_options = ArrowReaderOptions::new();
+        if !context
+            .read_format()
+            .arrow_schema()
+            .has_json_extension_field()
+        {
+            arrow_reader_options =
+                arrow_reader_options.with_schema(context.read_format().arrow_schema().clone());
+        }
         let arrow_metadata =
             ArrowReaderMetadata::try_new(parquet_metadata.clone(), arrow_reader_options)
                 .context(ReadDataPartSnafu)?;

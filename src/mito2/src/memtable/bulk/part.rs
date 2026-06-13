@@ -1623,6 +1623,11 @@ impl MultiBulkPart {
         self.batches.iter().map(|batch| batch.schema_ref().clone())
     }
 
+    /// Returns the schema of the first batch in this part.
+    pub(crate) fn schema(&self) -> Option<SchemaRef> {
+        self.batches.first().map(|batch| batch.schema_ref().clone())
+    }
+
     /// Reads data from this part with the given context and filters.
     ///
     /// If batch-level statistics are available and a predicate is set, prunes
