@@ -35,6 +35,8 @@ use crate::schema::ColumnDefaultConstraint;
 use crate::types::json_type::JsonNativeType;
 use crate::value::{ListValue, StructValue, Value};
 
+pub(crate) const GREPTIME_ROOT_FIELD_NAME: &str = "__greptime_root";
+
 /// JSON2 settings stored in column schema metadata and represented through
 /// Arrow extension metadata.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -121,15 +123,20 @@ impl<'a> JsonContext<'a> {
 /// Main encoding function with key path tracking
 pub fn encode_json_with_context<'a>(json: Json, context: &JsonContext<'a>) -> Result<JsonValue> {
     match json {
-        Json::Object(json_object) => encode_json_object_with_context(json_object, context),
+        Json::Object(json_object) => encode_json_object_with_context(json_object, context, true),
+        Json::Array(json_array) if context.path.is_empty() => {
+            encode_json_root_array_with_context(json_array, context)
+        }
+        json if context.path.is_empty() => encode_json_root_scalar_with_context(json, context),
         Json::Array(json_array) => encode_json_array_with_context(json_array, context),
-        _ => encode_json_value_with_context(json, context),
+        json => encode_json_value_with_context(json, context),
     }
 }
 
 fn encode_json_object_with_context<'a>(
     json_object: Map<String, Json>,
     context: &JsonContext<'a>,
+    reject_empty_root: bool,
 ) -> Result<JsonValue> {
     let mut object = BTreeMap::new();
     for (key, value) in json_object {
@@ -145,8 +152,91 @@ fn encode_json_object_with_context<'a>(
     }
 
     apply_missing_type_hints(&mut object, context)?;
+    if reject_empty_root && context.path.is_empty() && object.is_empty() {
+        return error::InvalidJsonSnafu {
+            value: "empty JSON2 root object is not supported".to_string(),
+        }
+        .fail();
+    }
 
     Ok(JsonValue::new(JsonVariant::Object(object)))
+}
+
+fn encode_json_root_scalar_with_context<'a>(
+    json: Json,
+    context: &JsonContext<'a>,
+) -> Result<JsonValue> {
+    let field_context = context.with_key(GREPTIME_ROOT_FIELD_NAME);
+    let value = if let Some(hint) = field_context.type_hint() {
+        encode_json_value_with_hint(json, hint, &field_context)?
+    } else {
+        encode_json_value_with_context(json, &field_context)?
+    };
+
+    let mut object = BTreeMap::new();
+    object.insert(GREPTIME_ROOT_FIELD_NAME.to_string(), value.into_variant());
+    Ok(JsonValue::new(JsonVariant::Object(object)))
+}
+
+fn encode_json_root_array_with_context<'a>(
+    json_array: Vec<Json>,
+    context: &JsonContext<'a>,
+) -> Result<JsonValue> {
+    let len = json_array.len();
+    let mut fields = BTreeMap::<String, Vec<JsonVariant>>::new();
+    let mut root_values = Vec::with_capacity(len);
+
+    for (index, value) in json_array.into_iter().enumerate() {
+        for values in fields.values_mut() {
+            values.push(JsonVariant::Null);
+        }
+        root_values.push(JsonVariant::Null);
+
+        match value {
+            Json::Object(json_object) => {
+                let value = encode_json_object_with_context(json_object, context, false)?;
+                let JsonVariant::Object(object) = value.into_variant() else {
+                    unreachable!("JSON object should encode into JSON object variant")
+                };
+
+                for (key, value) in object {
+                    let values = fields
+                        .entry(key)
+                        .or_insert_with(|| vec![JsonVariant::Null; index + 1]);
+                    values[index] = value;
+                }
+            }
+            json => {
+                let field_context = context.with_key(GREPTIME_ROOT_FIELD_NAME);
+                let value = encode_json_value_with_context(json, &field_context)?;
+                root_values[index] = value.into_variant();
+            }
+        }
+    }
+
+    if len == 0
+        || root_values
+            .iter()
+            .any(|value| !matches!(value, JsonVariant::Null))
+    {
+        fields.insert(GREPTIME_ROOT_FIELD_NAME.to_string(), root_values);
+    }
+
+    if fields.is_empty() {
+        return error::InvalidJsonSnafu {
+            value: "empty JSON2 root object is not supported".to_string(),
+        }
+        .fail();
+    }
+
+    let object = fields
+        .into_iter()
+        .map(|(key, values)| (key, JsonVariant::Array(values)))
+        .collect();
+    let mut value = JsonValue::new(JsonVariant::Object(object));
+    let json_type = value.json_type().clone();
+    value.try_align(&json_type)?;
+    Ok(value)
 }
 
 fn apply_missing_type_hints(
@@ -351,7 +441,7 @@ fn encode_json_value_with_context<'a>(json: Json, context: &JsonContext<'a>) -> 
         }
         Json::String(s) => Ok(s.into()),
         Json::Array(arr) => encode_json_array_with_context(arr, context),
-        Json::Object(obj) => encode_json_object_with_context(obj, context),
+        Json::Object(obj) => encode_json_object_with_context(obj, context, false),
     }
 }
 
@@ -484,62 +574,21 @@ mod tests {
     }
 
     #[test]
-    fn test_encode_json_null() {
-        let json = Json::Null;
+    fn test_encode_json_encodes_root_scalars_as_greptime_root() {
         let settings = JsonSettings::default();
-        let result = settings.encode(json).unwrap().into_json_inner().unwrap();
-        assert_eq!(result, Value::Null);
-    }
+        let result = settings
+            .encode(Json::Bool(true))
+            .unwrap()
+            .into_json_inner()
+            .unwrap();
 
-    #[test]
-    fn test_encode_json_boolean() {
-        let json = Json::Bool(true);
-        let settings = JsonSettings::default();
-        let result = settings.encode(json).unwrap().into_json_inner().unwrap();
-        assert_eq!(result, Value::Boolean(true));
-    }
-
-    #[test]
-    fn test_encode_json_number_integer() {
-        let json = Json::from(42);
-        let settings = JsonSettings::default();
-        let result = settings.encode(json).unwrap().into_json_inner().unwrap();
-        assert_eq!(result, Value::Int64(42));
-    }
-
-    #[test]
-    fn test_encode_json_number_float() {
-        let json = Json::from(3.15);
-        let settings = JsonSettings::default();
-        let result = settings.encode(json).unwrap().into_json_inner().unwrap();
-        match result {
-            Value::Float64(f) => assert_eq!(f.0, 3.15),
-            _ => panic!("Expected Float64"),
-        }
-    }
-
-    #[test]
-    fn test_encode_json_string() {
-        let json = Json::String("hello".to_string());
-        let settings = JsonSettings::default();
-        let result = settings.encode(json).unwrap().into_json_inner().unwrap();
-        assert_eq!(result, Value::String("hello".into()));
-    }
-
-    #[test]
-    fn test_encode_json_array() {
-        let json = json!([1, 2, 3]);
-        let settings = JsonSettings::default();
-        let result = settings.encode(json).unwrap().into_json_inner().unwrap();
-
-        if let Value::List(list_value) = result {
-            assert_eq!(list_value.items().len(), 3);
-            assert_eq!(list_value.items()[0], Value::Int64(1));
-            assert_eq!(list_value.items()[1], Value::Int64(2));
-            assert_eq!(list_value.items()[2], Value::Int64(3));
-        } else {
-            panic!("Expected List value");
-        }
+        let Value::Struct(root) = result else {
+            panic!("Expected Struct value");
+        };
+        assert_eq!(
+            struct_field_value(&root, GREPTIME_ROOT_FIELD_NAME),
+            &Value::Boolean(true)
+        );
     }
 
     #[test]
@@ -640,29 +689,82 @@ mod tests {
     }
 
     #[test]
-    fn test_encode_json_array_mixed_types() {
-        let json = json!([1, "hello", true, 3.15]);
+    fn test_encode_json_splits_mixed_root_array() {
         let settings = JsonSettings::default();
-        let value = settings.encode(json).unwrap();
-        assert_eq!(value.data_type().to_string(), r#"Json2["<Variant>"]"#);
+        let result = settings
+            .encode(json!([1, { "a": 2 }]))
+            .unwrap()
+            .into_json_inner()
+            .unwrap();
+
+        let Value::Struct(root) = result else {
+            panic!("Expected Struct value");
+        };
+
+        let Value::List(a) = struct_field_value(&root, "a") else {
+            panic!("Expected a list");
+        };
+        assert_eq!(a.items(), &[Value::Null, Value::Int64(2)]);
+
+        let Value::List(greptime_root) = struct_field_value(&root, GREPTIME_ROOT_FIELD_NAME) else {
+            panic!("Expected __greptime_root list");
+        };
+        assert_eq!(greptime_root.items(), &[Value::Int64(1), Value::Null]);
     }
 
     #[test]
-    fn test_encode_json_empty_array() {
-        let json = json!([]);
+    fn test_encode_json_root_object_array_omits_greptime_root() {
         let settings = JsonSettings::default();
-        let result = settings.encode(json).unwrap().into_json_inner().unwrap();
+        let result = settings
+            .encode(json!([{ "a": 1 }, { "a": 2 }]))
+            .unwrap()
+            .into_json_inner()
+            .unwrap();
 
-        if let Value::List(list_value) = result {
-            assert_eq!(list_value.items().len(), 0);
-            // Empty arrays default to string type
-            assert_eq!(
-                list_value.datatype(),
-                Arc::new(ConcreteDataType::null_datatype())
-            );
-        } else {
-            panic!("Expected List value");
-        }
+        let Value::Struct(root) = result else {
+            panic!("Expected Struct value");
+        };
+        let Value::List(a) = struct_field_value(&root, "a") else {
+            panic!("Expected a list");
+        };
+        assert_eq!(a.items(), &[Value::Int64(1), Value::Int64(2)]);
+        assert!(
+            root.struct_type()
+                .fields()
+                .iter()
+                .all(|field| field.name() != GREPTIME_ROOT_FIELD_NAME)
+        );
+    }
+
+    #[test]
+    fn test_encode_json_root_scalar_array_uses_greptime_root() {
+        let settings = JsonSettings::default();
+        let result = settings
+            .encode(json!([1, 3, 4]))
+            .unwrap()
+            .into_json_inner()
+            .unwrap();
+
+        let Value::Struct(root) = result else {
+            panic!("Expected Struct value");
+        };
+        let Value::List(greptime_root) = struct_field_value(&root, GREPTIME_ROOT_FIELD_NAME) else {
+            panic!("Expected __greptime_root list");
+        };
+        assert_eq!(
+            greptime_root.items(),
+            &[Value::Int64(1), Value::Int64(3), Value::Int64(4)]
+        );
+    }
+
+    #[test]
+    fn test_encode_json_rejects_empty_root_object() {
+        let settings = JsonSettings::default();
+        let err = settings.encode(json!({})).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("empty JSON2 root object is not supported")
+        );
     }
 
     #[test]
@@ -1049,14 +1151,32 @@ mod tests {
     #[test]
     fn test_encode_json_large_unsigned_integer() {
         // Test unsigned integer that fits in i64
-        let json = Json::from(u64::MAX / 2);
         let settings = JsonSettings::default();
-        let result = settings.encode(json).unwrap().into_json_inner().unwrap();
-        assert_eq!(result, Value::Int64((u64::MAX / 2) as i64));
+        let result = settings
+            .encode(json!({ "value": u64::MAX / 2 }))
+            .unwrap()
+            .into_json_inner()
+            .unwrap();
+        let Value::Struct(result) = result else {
+            panic!("Expected Struct value");
+        };
+        assert_eq!(
+            struct_field_value(&result, "value"),
+            &Value::Int64((u64::MAX / 2) as i64)
+        );
 
         // Test unsigned integer that exceeds i64 range
-        let json = Json::from(u64::MAX);
-        let result = settings.encode(json).unwrap().into_json_inner().unwrap();
-        assert_eq!(result, Value::UInt64(u64::MAX));
+        let result = settings
+            .encode(json!({ "value": u64::MAX }))
+            .unwrap()
+            .into_json_inner()
+            .unwrap();
+        let Value::Struct(result) = result else {
+            panic!("Expected Struct value");
+        };
+        assert_eq!(
+            struct_field_value(&result, "value"),
+            &Value::UInt64(u64::MAX)
+        );
     }
 }

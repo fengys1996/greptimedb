@@ -384,13 +384,9 @@ impl JsonValue {
                 JsonVariant::String(x) => Value::String(x.into()),
                 JsonVariant::Array(array) => {
                     let values = array.into_iter().map(helper).collect::<Vec<_>>();
-                    debug_assert!(
-                        values
-                            .windows(2)
-                            .all(|w| w[0].data_type() == w[1].data_type())
-                    );
                     let item_type = values
-                        .first()
+                        .iter()
+                        .find(|x| !x.is_null())
                         .map(|x| x.data_type())
                         .unwrap_or_else(ConcreteDataType::null_datatype);
                     Value::List(ListValue::new(values, Arc::new(item_type)))
@@ -777,6 +773,10 @@ impl<'a> JsonValueRef<'a> {
         matches!(self.json_variant, JsonVariantRef::Object(_))
     }
 
+    pub(crate) fn is_empty_object(&self) -> bool {
+        matches!(self.json_variant, JsonVariantRef::Object(ref object) if object.is_empty())
+    }
+
     pub(crate) fn as_f32(&self) -> Option<f32> {
         match self.json_variant {
             JsonVariantRef::Number(JsonNumber::Float(f)) => f.to_f32(),
@@ -804,11 +804,11 @@ impl<'a> JsonValueRef<'a> {
                 JsonVariantRef::String(x) => ValueRef::String(x),
                 JsonVariantRef::Array(array) => {
                     let val = array.iter().map(helper).collect::<Vec<_>>();
-                    let item_datatype = if let Some(first) = val.first() {
-                        first.data_type()
-                    } else {
-                        ConcreteDataType::null_datatype()
-                    };
+                    let item_datatype = val
+                        .iter()
+                        .find(|x| !x.is_null())
+                        .map(|x| x.data_type())
+                        .unwrap_or_else(ConcreteDataType::null_datatype);
                     ValueRef::List(ListValueRef::RefList {
                         val,
                         item_datatype: Arc::new(item_datatype),
@@ -842,14 +842,8 @@ impl<'a> JsonValueRef<'a> {
     }
 
     pub(crate) fn as_struct_value(&self) -> ValueRef<'_> {
-        if self.is_object() {
-            return self.as_value_ref();
-        }
-
-        ValueRef::Struct(StructValueRef::RefList {
-            val: vec![self.as_value_ref()],
-            fields: self.json_type().as_struct_type(),
-        })
+        debug_assert!(self.is_object());
+        self.as_value_ref()
     }
 }
 

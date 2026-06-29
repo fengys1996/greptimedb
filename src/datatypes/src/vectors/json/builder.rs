@@ -16,6 +16,7 @@ use std::any::Any;
 
 use crate::data_type::ConcreteDataType;
 use crate::error::{Result, TryFromValueSnafu, UnsupportedOperationSnafu};
+use crate::json::GREPTIME_ROOT_FIELD_NAME;
 use crate::json::value::{JsonValue, JsonVariant};
 use crate::prelude::{ValueRef, Vector, VectorRef};
 use crate::types::JsonType;
@@ -88,12 +89,24 @@ impl MutableVector for JsonVectorBuilder {
             }
             .fail();
         };
-        let json_type = value.json_type();
-        if !self.merged_type.is_include(json_type) {
-            self.merged_type.merge(json_type)?;
+        if value.is_empty_object() {
+            return TryFromValueSnafu {
+                reason: "JSON2 root object must not be empty".to_string(),
+            }
+            .fail();
         }
 
-        let value = JsonValue::new(JsonVariant::from(value.variant().clone()));
+        let mut value = JsonValue::new(JsonVariant::from(value.variant().clone()));
+        if !value.as_ref().is_object() {
+            value = JsonValue::new(JsonVariant::Object(
+                [(GREPTIME_ROOT_FIELD_NAME.to_string(), value.into_variant())].into(),
+            ));
+        }
+
+        if !self.merged_type.is_include(value.json_type()) {
+            self.merged_type.merge(value.json_type())?;
+        }
+
         self.values.push(value);
         Ok(())
     }
@@ -200,36 +213,47 @@ mod tests {
             ))
         );
 
-        // Root-level conflicts should be lifted to a plain Variant field that preserves
-        // each original JSON payload.
-        let mut variant_builder = JsonVectorBuilder::new(JsonNativeType::Bool, 2);
+        // Non-object JSON2 roots should be wrapped into the reserved root field.
+        let mut variant_builder =
+            JsonVectorBuilder::new(JsonNativeType::Object(Default::default()), 2);
         let object = parse_json_value(r#"{"k":1}"#);
         let boolean = parse_json_value("true");
-        variant_builder.try_push_value_ref(&boolean.as_value_ref())?;
         variant_builder.try_push_value_ref(&object.as_value_ref())?;
+        variant_builder.try_push_value_ref(&boolean.as_value_ref())?;
 
-        let variant_type = JsonType::new_json2(JsonNativeType::Variant);
+        let wrapped_type = JsonType::new_json2(JsonNativeType::Object(JsonObjectType::from([
+            (GREPTIME_ROOT_FIELD_NAME.to_string(), JsonNativeType::Bool),
+            ("k".to_string(), JsonNativeType::i64()),
+        ])));
         assert_eq!(
             variant_builder.data_type(),
-            ConcreteDataType::Json(variant_type.clone())
+            ConcreteDataType::Json(wrapped_type.clone())
         );
 
-        let variant_struct_type = variant_type.as_struct_type();
+        let wrapped_struct_type = wrapped_type.as_struct_type();
         let vector = variant_builder.to_vector();
         assert_eq!(
             vector.get(0),
             Value::Struct(StructValue::new(
-                vec![Value::Binary(Bytes::from(b"true".to_vec()))],
-                variant_struct_type.clone(),
+                vec![Value::Null, Value::Int64(1)],
+                wrapped_struct_type.clone(),
             ))
         );
         assert_eq!(
             vector.get(1),
             Value::Struct(StructValue::new(
-                vec![Value::Binary(Bytes::from(br#"{"k":1}"#.to_vec()))],
-                variant_struct_type,
+                vec![Value::Boolean(true), Value::Null],
+                wrapped_struct_type,
             ))
         );
+
+        let empty_object = parse_json_value("{}");
+        let mut empty_builder =
+            JsonVectorBuilder::new(JsonNativeType::Object(Default::default()), 1);
+        let err = empty_builder
+            .try_push_value_ref(&empty_object.as_value_ref())
+            .unwrap_err();
+        assert!(err.to_string().contains("root object must not be empty"));
 
         // Non-JSON values should be rejected at push time.
         let mut invalid_builder = JsonVectorBuilder::new(JsonNativeType::Bool, 1);
