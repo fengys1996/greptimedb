@@ -24,7 +24,8 @@ use arrow_array::builder::{
 use arrow_array::cast::AsArray;
 use arrow_array::types::{Float64Type, Int64Type, UInt64Type};
 use arrow_array::{Array, ArrayRef, GenericListArray, ListArray, StructArray, new_null_array};
-use arrow_schema::{DataType, FieldRef};
+use arrow_schema::{DataType, Field, FieldRef, Fields};
+use parquet::variant::variant_to_json;
 use serde_json::Value;
 use snafu::{OptionExt, ResultExt};
 
@@ -62,6 +63,19 @@ impl JsonArray<'_> {
                 serde_json::from_slice(bytes).with_context(|_| DeserializeSnafu {
                     json: String::from_utf8_lossy(bytes),
                 })?
+            }
+            DataType::Struct(_) if is_parquet_variant_struct(array.data_type()) => {
+                let normalized = normalize_variant_struct(array.as_struct())?;
+                let normalized: ArrayRef = Arc::new(normalized);
+                let json_strings = variant_to_json(&normalized).context(ArrowComputeSnafu)?;
+                if json_strings.is_null(i) {
+                    Value::Null
+                } else {
+                    let json_str = json_strings.value(i);
+                    serde_json::from_str(json_str).with_context(|_| DeserializeSnafu {
+                        json: json_str.to_string(),
+                    })?
+                }
             }
             DataType::Struct(_) => {
                 let structs = array.as_struct();
@@ -196,6 +210,10 @@ impl JsonArray<'_> {
             return Ok(self.inner.clone());
         }
 
+        if is_parquet_variant_struct(from_type) {
+            return self.decode_parquet_variant(to_type);
+        }
+
         if from_type.is_binary() && !to_type.is_binary() {
             return self.decode_variant(to_type);
         }
@@ -241,6 +259,21 @@ impl JsonArray<'_> {
             builder.append_option(value);
         }
         Ok(Arc::new(builder.finish()))
+    }
+
+    fn decode_parquet_variant(&self, to_type: &DataType) -> Result<ArrayRef> {
+        let normalized = normalize_variant_struct(self.inner.as_struct())?;
+        let normalized: ArrayRef = Arc::new(normalized);
+        let json_array = variant_to_json(&normalized).context(ArrowComputeSnafu)?;
+        if json_array.data_type() == to_type {
+            return Ok(Arc::new(json_array));
+        }
+        if to_type.is_binary() {
+            return arrow::compute::cast(&json_array, to_type).context(ArrowComputeSnafu);
+        }
+        let binary_array =
+            arrow::compute::cast(&json_array, &DataType::Binary).context(ArrowComputeSnafu)?;
+        JsonArray::from(&binary_array).try_cast(to_type)
     }
 
     fn decode_variant(&self, to_type: &DataType) -> Result<ArrayRef> {
@@ -303,6 +336,34 @@ impl JsonArray<'_> {
         }
         Ok(builder.finish())
     }
+}
+
+fn is_parquet_variant_struct(data_type: &DataType) -> bool {
+    if let DataType::Struct(fields) = data_type {
+        fields.len() == 2
+            && fields[0].name() == "metadata"
+            && fields[0].data_type().is_binary()
+            && fields[1].name() == "value"
+            && fields[1].data_type().is_binary()
+    } else {
+        false
+    }
+}
+
+fn normalize_variant_struct(array: &StructArray) -> Result<StructArray> {
+    let metadata =
+        arrow::compute::cast(array.column(0), &DataType::Binary).context(ArrowComputeSnafu)?;
+    let value =
+        arrow::compute::cast(array.column(1), &DataType::Binary).context(ArrowComputeSnafu)?;
+    StructArray::try_new(
+        Fields::from(vec![
+            Field::new("metadata", DataType::Binary, true),
+            Field::new("value", DataType::Binary, true),
+        ]),
+        vec![metadata, value],
+        array.nulls().cloned(),
+    )
+    .context(ArrowComputeSnafu)
 }
 
 fn try_align_list(
@@ -567,6 +628,105 @@ mod test {
             ]),
         )
         .test()?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_decode_parquet_variant() -> Result<()> {
+        use parquet::variant::{VariantType, json_to_variant};
+
+        // Create a VariantArray from JSON strings
+        let json_input: ArrayRef = Arc::new(StringArray::from(vec![
+            Some(r#"{"name":"foo","value":42}"#),
+            None,
+            Some(r#""raw_string""#),
+            Some("1234"),
+        ]));
+        let variant_array = json_to_variant(&json_input).context(ArrowComputeSnafu)?;
+        let variant_field = variant_array.field("variant");
+        let variant_array_ref: ArrayRef = ArrayRef::from(variant_array);
+
+        // Verify it's a variant struct
+        assert!(is_parquet_variant_struct(variant_array_ref.data_type()));
+        assert!(variant_field.has_valid_extension_type::<VariantType>());
+
+        // Test try_get_value with variant array
+        let json_array = JsonArray::from(&variant_array_ref);
+        assert_eq!(
+            json_array.try_get_value(0)?,
+            json!({"name": "foo", "value": 42})
+        );
+        assert_eq!(json_array.try_get_value(1)?, Value::Null);
+        assert_eq!(json_array.try_get_value(2)?, json!("raw_string"));
+        assert_eq!(json_array.try_get_value(3)?, json!(1234));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_decode_parquet_variant_in_struct() -> Result<()> {
+        use parquet::variant::json_to_variant;
+
+        // Simulate a JSON2 struct where `payload` is a variant field.
+        // This is what comes back from parquet reading.
+        let variant_input: ArrayRef = Arc::new(StringArray::from(vec![
+            Some(r#"{"name":"foo","value":42}"#),
+            None,
+            Some(r#""raw_string""#),
+        ]));
+        let variant_array = json_to_variant(&variant_input).context(ArrowComputeSnafu)?;
+        let payload_field = variant_array.field("payload");
+        let variant_array_ref: ArrayRef = ArrayRef::from(variant_array);
+
+        let raw_struct = StructArray::try_new(
+            Fields::from(vec![
+                Field::new("count", DataType::Int64, true),
+                Field::new("flag", DataType::Boolean, true),
+                payload_field,
+            ]),
+            vec![
+                Arc::new(Int64Array::from(vec![Some(10), Some(20), None])) as ArrayRef,
+                Arc::new(BooleanArray::from(vec![
+                    Some(true),
+                    Some(false),
+                    Some(true),
+                ])) as ArrayRef,
+                variant_array_ref,
+            ],
+            None,
+        )
+        .context(ArrowComputeSnafu)?;
+        let raw_struct: ArrayRef = Arc::new(raw_struct);
+
+        // Expected type: payload is Binary (Variant)
+        let expected_type = DataType::Struct(Fields::from(vec![
+            Arc::new(Field::new("count", DataType::Int64, true)),
+            Arc::new(Field::new("flag", DataType::Boolean, true)),
+            Arc::new(Field::new("payload", DataType::Binary, true)),
+        ]));
+
+        let aligned = JsonArray::from(&raw_struct).try_align(&expected_type)?;
+
+        // Verify aligned struct fields
+        let aligned_struct = aligned.as_struct();
+        assert_eq!(aligned_struct.len(), 3);
+
+        // Check the payload field is now Binary
+        let payload_col = aligned_struct.column_by_name("payload").unwrap();
+        assert!(payload_col.data_type().is_binary());
+
+        // Verify the binary payloads are valid JSON
+        let payload_binary = payload_col.as_any().downcast_ref::<BinaryArray>().unwrap();
+        assert!(payload_binary.is_valid(0));
+        assert!(payload_binary.is_null(1));
+        assert!(payload_binary.is_valid(2));
+
+        let json: serde_json::Value = serde_json::from_slice(payload_binary.value(0)).unwrap();
+        assert_eq!(json, json!({"name": "foo", "value": 42}));
+
+        let json: serde_json::Value = serde_json::from_slice(payload_binary.value(2)).unwrap();
+        assert_eq!(json, json!("raw_string"));
 
         Ok(())
     }
