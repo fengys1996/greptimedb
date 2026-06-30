@@ -47,8 +47,7 @@ impl JsonVectorBuilder {
                 builder.push_null();
                 continue;
             }
-            let value_ref = &value.as_ref().as_value_ref();
-            builder.try_push_value_ref(value_ref)?;
+            builder.try_push_value_ref(&value.as_ref().as_value_ref())?;
         }
         Ok(builder.to_vector())
     }
