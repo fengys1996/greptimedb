@@ -218,16 +218,10 @@ fn project_json_fallback_batch(
         let mut replacements = HashMap::new();
 
         for fallback in fallback {
-            let target_field =
-                field_by_path(&root_field, &fallback.requested_path[1..]).ok_or_else(|| {
-                    UnexpectedSnafu {
-                        reason: format!(
-                            "NestedJsonFallbackProjector cannot find requested path {:?} in output schema",
-                            fallback.requested_path
-                        ),
-                    }
-                    .build()
-                })?;
+            let Some(target_field) = field_by_path(&root_field, &fallback.requested_path[1..])
+            else {
+                continue;
+            };
             let physical_array = array_by_path(&root_array, &fallback.physical_path[1..]);
             let replacement = match physical_array {
                 Some(physical_array) => extract_jsonb_path(

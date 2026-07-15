@@ -19,11 +19,14 @@ use arrow::compute;
 use arrow::util::display::{ArrayFormatter, FormatOptions};
 use arrow_array::builder::{
     ArrayBuilder, BooleanBuilder, Float64Builder, Int64Builder, NullBuilder, StringViewBuilder,
-    make_builder,
+    UInt64Builder, make_builder,
 };
 use arrow_array::cast::AsArray;
 use arrow_array::types::{Float64Type, Int64Type, UInt64Type};
-use arrow_array::{Array, ArrayRef, GenericListArray, ListArray, StructArray, new_null_array};
+use arrow_array::{
+    Array, ArrayRef, BooleanArray, Float64Array, GenericListArray, Int64Array, ListArray,
+    StructArray, UInt64Array, new_null_array,
+};
 use arrow_schema::{DataType, FieldRef};
 use serde_json::Value;
 use snafu::{OptionExt, ResultExt};
@@ -112,6 +115,10 @@ impl JsonArray<'_> {
             self.inner.data_type(),
             expect
         );
+
+        if self.inner.data_type().is_binary() {
+            return self.try_cast(expect);
+        }
 
         let struct_array = self.inner.as_struct_opt().context(AlignJsonArraySnafu {
             reason: "expect struct array",
@@ -279,6 +286,12 @@ impl JsonArray<'_> {
                         b.append_option(self.try_get_value(i)?.as_f64());
                     }
                 }
+                DataType::UInt64 => {
+                    let b = downcast_builder::<UInt64Builder>(builder.as_mut(), to_type)?;
+                    for i in 0..self.inner.len() {
+                        b.append_option(self.try_get_value(i)?.as_u64());
+                    }
+                }
                 DataType::Utf8View => {
                     let b = downcast_builder::<StringViewBuilder>(builder.as_mut(), to_type)?;
                     for i in 0..self.inner.len() {
@@ -292,6 +305,12 @@ impl JsonArray<'_> {
                         }
                     }
                 }
+                DataType::Struct(_) => {
+                    let values = (0..self.inner.len())
+                        .map(|i| self.try_get_value(i))
+                        .collect::<Result<Vec<_>>>()?;
+                    return json_values_to_array(&values, to_type);
+                }
                 _ => {
                     return CastTypeSnafu {
                         msg: format!("Cannot cast JSON value to {to_type}"),
@@ -301,6 +320,77 @@ impl JsonArray<'_> {
             }
         }
         Ok(builder.finish())
+    }
+}
+
+fn json_values_to_array(values: &[Value], data_type: &DataType) -> Result<ArrayRef> {
+    match data_type {
+        DataType::Null => Ok(new_null_array(data_type, values.len())),
+        DataType::Boolean => Ok(Arc::new(BooleanArray::from_iter(
+            values.iter().map(Value::as_bool),
+        ))),
+        DataType::Int64 => Ok(Arc::new(Int64Array::from_iter(
+            values.iter().map(Value::as_i64),
+        ))),
+        DataType::UInt64 => Ok(Arc::new(UInt64Array::from_iter(
+            values.iter().map(Value::as_u64),
+        ))),
+        DataType::Float64 => Ok(Arc::new(Float64Array::from_iter(
+            values.iter().map(Value::as_f64),
+        ))),
+        DataType::Utf8View => Ok(Arc::new(StringViewArray::from_iter(values.iter().map(
+            |value| {
+                if value.is_null() {
+                    None
+                } else if let Some(value) = value.as_str() {
+                    Some(value.to_string())
+                } else {
+                    Some(value.to_string())
+                }
+            },
+        )))),
+        DataType::Binary => {
+            let encoded = values
+                .iter()
+                .map(|value| (!value.is_null()).then(|| encode_serde_json_as_jsonb(value.clone())))
+                .collect::<Vec<_>>();
+            let total_bytes = encoded
+                .iter()
+                .filter_map(|value| value.as_ref().map(Vec::len))
+                .sum();
+            let mut builder = MutableBinaryArray::with_capacity(values.len(), total_bytes);
+            for value in encoded {
+                builder.append_option(value);
+            }
+            Ok(Arc::new(builder.finish()))
+        }
+        DataType::Struct(fields) => {
+            let arrays = fields
+                .iter()
+                .map(|field| {
+                    let child_values = values
+                        .iter()
+                        .map(|value| {
+                            value
+                                .as_object()
+                                .and_then(|object| object.get(field.name()))
+                                .cloned()
+                                .unwrap_or(Value::Null)
+                        })
+                        .collect::<Vec<_>>();
+                    json_values_to_array(&child_values, field.data_type())
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Ok(Arc::new(
+                StructArray::try_new(fields.clone(), arrays, None).map_err(|e| {
+                    AlignJsonArraySnafu {
+                        reason: e.to_string(),
+                    }
+                    .build()
+                })?,
+            ))
+        }
+        _ => Ok(new_null_array(data_type, values.len())),
     }
 }
 
@@ -501,6 +591,28 @@ mod test {
                 Arc::new(StringArray::new_null(3)),
             ]),
         )
+        .test()?;
+
+        // Test variant jsonb values can be aligned to a struct. Non-object values are treated as
+        // missing fields instead of failing the scan.
+        let object = encode_serde_json_as_jsonb(json!({"x": "v"}));
+        let scalar = encode_serde_json_as_jsonb(json!(1));
+        TestCase {
+            json_array: Arc::new(BinaryArray::from(vec![
+                Some(object.as_slice()),
+                Some(scalar.as_slice()),
+                None,
+            ])),
+            schema_type: DataType::Struct(Fields::from(vec![Field::new(
+                "x",
+                DataType::Utf8View,
+                true,
+            )])),
+            expected: Ok(Arc::new(StructArray::from(vec![(
+                Arc::new(Field::new("x", DataType::Utf8View, true)),
+                Arc::new(StringViewArray::from(vec![Some("v"), None, None])) as ArrayRef,
+            )]))),
+        }
         .test()?;
 
         // Test complex json array alignment.
