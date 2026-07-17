@@ -155,6 +155,26 @@ SELECT j.a.b FROM json2_nested_array_parent ORDER BY ts;
 
 DROP TABLE json2_nested_array_parent;
 
+-- Reading a parent JSON2 path together with a child path must keep the parent path.
+CREATE TABLE json2_nested_full_with_path (
+    ts timestamp time index,
+    j json2
+) WITH (
+    'append_mode' = 'true',
+    'sst_format' = 'flat',
+);
+
+INSERT INTO json2_nested_full_with_path
+VALUES
+    (1, '{"a": {"b": "b1", "c": "keep-c1"}, "d": "keep-d1"}'),
+    (2, '{"a": {"b": "b2", "c": "keep-c2"}, "d": "keep-d2"}');
+
+ADMIN FLUSH_TABLE('json2_nested_full_with_path');
+
+SELECT j.a, j.a.b FROM json2_nested_full_with_path ORDER BY ts;
+
+DROP TABLE json2_nested_full_with_path;
+
 -- Typed casts after reading nested paths through fallback.
 CREATE TABLE json2_nested_typed_cast (
     ts timestamp time index,
