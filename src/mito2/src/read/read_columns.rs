@@ -125,7 +125,7 @@ pub enum ColumnProjection {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct NestedProjection {
     /// Nested field paths under the root column.
-    pub paths: Vec<NestedPath>,
+    pub paths: NestedPathSet,
     /// How to handle requested paths missing from a parquet file schema.
     pub missing_path_policy: MissingPathPolicy,
 }
@@ -138,6 +138,59 @@ pub enum MissingPathPolicy {
     PrefixOnly,
     /// If a requested path is missing, read the nearest variant parent.
     FallbackToNearestVariantParent,
+}
+
+/// A normalized set of nested field paths.
+///
+/// The set keeps only the shortest prefix needed to cover requested paths. For
+/// example, `["j", "a"]` covers `["j", "a", "b"]`, so only `["j", "a"]`
+/// is retained.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
+pub struct NestedPathSet {
+    paths: Vec<NestedPath>,
+}
+
+impl NestedPathSet {
+    /// Creates a normalized path set from raw nested paths.
+    pub fn new(paths: Vec<NestedPath>) -> Self {
+        let mut set = Self {
+            paths: Vec::with_capacity(paths.len()),
+        };
+        set.merge(paths);
+        set
+    }
+
+    /// Inserts a nested path and keeps the set normalized.
+    pub fn insert(&mut self, path: NestedPath) {
+        if self
+            .paths
+            .iter()
+            .any(|existing| path.starts_with(existing.as_slice()))
+        {
+            return;
+        }
+
+        self.paths
+            .retain(|existing| !existing.starts_with(path.as_slice()));
+        self.paths.push(path);
+    }
+
+    /// Merges raw nested paths into this set.
+    pub fn merge(&mut self, paths: Vec<NestedPath>) {
+        for path in paths {
+            self.insert(path);
+        }
+    }
+
+    /// Returns the normalized paths.
+    pub fn paths(&self) -> &[NestedPath] {
+        &self.paths
+    }
+
+    /// Consumes the set and returns the normalized paths.
+    pub fn into_vec(self) -> Vec<NestedPath> {
+        self.paths
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
@@ -239,23 +292,13 @@ pub fn merge(a: ReadColumns, b: ReadColumns) -> ReadColumns {
 }
 
 fn normalize_nested_paths(nested_paths: Vec<NestedPath>) -> Vec<NestedPath> {
-    let mut normalized = Vec::with_capacity(nested_paths.len());
-    merge_nested_paths(&mut normalized, nested_paths);
-    normalized
+    NestedPathSet::new(nested_paths).into_vec()
 }
 
 pub(crate) fn merge_nested_paths(merged: &mut Vec<NestedPath>, incoming: Vec<NestedPath>) {
-    for path in incoming {
-        if merged
-            .iter()
-            .any(|existing| path.starts_with(existing.as_slice()))
-        {
-            continue;
-        }
-
-        merged.retain(|existing| !existing.starts_with(path.as_slice()));
-        merged.push(path);
-    }
+    let mut set = NestedPathSet::new(mem::take(merged));
+    set.merge(incoming);
+    *merged = set.into_vec();
 }
 
 /// Build [`ReadColumns`] from [`ProjectionInput`].
@@ -617,6 +660,30 @@ mod tests {
                 ],
             },
             merged
+        );
+    }
+
+    #[test]
+    fn test_nested_path_set_parent_path_covers_children() {
+        let set = NestedPathSet::new(vec![
+            nested_path(&["j", "a", "b"]),
+            nested_path(&["j", "a"]),
+            nested_path(&["j", "a", "c"]),
+        ]);
+
+        assert_eq!(set.paths(), &[nested_path(&["j", "a"])]);
+    }
+
+    #[test]
+    fn test_nested_path_set_skips_child_path_if_parent_exists() {
+        let mut set = NestedPathSet::new(vec![nested_path(&["j", "a"])]);
+
+        set.insert(nested_path(&["j", "a", "b"]));
+        set.insert(nested_path(&["j", "b"]));
+
+        assert_eq!(
+            set.paths(),
+            &[nested_path(&["j", "a"]), nested_path(&["j", "b"])]
         );
     }
 
