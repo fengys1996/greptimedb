@@ -112,6 +112,34 @@ pub struct ReadColumn {
     pub nested_path_read_strategy: NestedReadStrategy,
 }
 
+/// Projection requirement for a single read column.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ColumnProjection {
+    /// Read the whole root column.
+    Full,
+    /// Read selected nested fields under the root column.
+    Nested(NestedProjection),
+}
+
+/// Nested projection requirement for a single read column.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct NestedProjection {
+    /// Nested field paths under the root column.
+    pub paths: Vec<NestedPath>,
+    /// How to handle requested paths missing from a parquet file schema.
+    pub missing_path_policy: MissingPathPolicy,
+}
+
+/// Policy for handling requested nested paths missing from a parquet file schema.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MissingPathPolicy {
+    /// Only read parquet leaves whose paths start with the requested nested paths.
+    #[default]
+    PrefixOnly,
+    /// If a requested path is missing, read the nearest variant parent.
+    FallbackToNearestVariantParent,
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NestedReadStrategy {
     /// Read parquet leaves whose paths start with the requested nested paths.
