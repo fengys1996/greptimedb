@@ -604,11 +604,14 @@ impl FormatProjection {
                     .get(&col.column_id)
                     .copied()
                     .map(|index_of_sst| {
+                        let column_id = col.column_id;
+                        let (nested_paths, nested_path_read_strategy) =
+                            col.into_nested_paths_and_strategy();
                         (
-                            col.column_id,
+                            column_id,
                             index_of_sst,
-                            col.nested_paths,
-                            col.nested_path_read_strategy,
+                            nested_paths,
+                            nested_path_read_strategy,
                         )
                     })
             })

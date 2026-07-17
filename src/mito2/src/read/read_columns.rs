@@ -59,7 +59,7 @@ use crate::read::scan_region::PredicateGroup;
 /// )
 /// ```
 ///
-/// If `nested_paths` is empty, the whole column will be read.
+/// If [`ColumnProjection::Full`] is used, the whole column will be read.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
 pub struct ReadColumns {
     pub cols: Vec<ReadColumn>,
@@ -106,10 +106,7 @@ impl ReadColumns {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ReadColumn {
     pub column_id: ColumnId,
-    /// Nested field paths under this column.
-    /// Empty means reading the whole column.
-    pub nested_paths: Vec<NestedPath>,
-    pub nested_path_read_strategy: NestedReadStrategy,
+    pub projection: ColumnProjection,
 }
 
 /// Projection requirement for a single read column.
@@ -138,6 +135,38 @@ pub enum MissingPathPolicy {
     PrefixOnly,
     /// If a requested path is missing, read the nearest variant parent.
     FallbackToNearestVariantParent,
+}
+
+impl MissingPathPolicy {
+    pub fn merge(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::FallbackToNearestVariantParent, _)
+            | (_, Self::FallbackToNearestVariantParent) => Self::FallbackToNearestVariantParent,
+            (Self::PrefixOnly, Self::PrefixOnly) => Self::PrefixOnly,
+        }
+    }
+}
+
+impl From<NestedReadStrategy> for MissingPathPolicy {
+    fn from(strategy: NestedReadStrategy) -> Self {
+        match strategy {
+            NestedReadStrategy::Prefix => Self::PrefixOnly,
+            NestedReadStrategy::FallbackToNearestVariantParent => {
+                Self::FallbackToNearestVariantParent
+            }
+        }
+    }
+}
+
+impl From<MissingPathPolicy> for NestedReadStrategy {
+    fn from(policy: MissingPathPolicy) -> Self {
+        match policy {
+            MissingPathPolicy::PrefixOnly => Self::Prefix,
+            MissingPathPolicy::FallbackToNearestVariantParent => {
+                Self::FallbackToNearestVariantParent
+            }
+        }
+    }
 }
 
 /// A normalized set of nested field paths.
@@ -220,85 +249,162 @@ impl NestedReadStrategy {
 
 impl ReadColumn {
     pub fn new(column_id: ColumnId, nested_paths: Vec<NestedPath>) -> Self {
+        if nested_paths.is_empty() {
+            return Self::full(column_id);
+        }
+
+        Self::nested(
+            column_id,
+            NestedPathSet::new(nested_paths),
+            MissingPathPolicy::PrefixOnly,
+        )
+    }
+
+    pub fn full(column_id: ColumnId) -> Self {
         Self {
             column_id,
-            nested_paths,
-            nested_path_read_strategy: NestedReadStrategy::Prefix,
+            projection: ColumnProjection::Full,
+        }
+    }
+
+    pub fn nested(
+        column_id: ColumnId,
+        paths: NestedPathSet,
+        missing_path_policy: MissingPathPolicy,
+    ) -> Self {
+        Self {
+            column_id,
+            projection: ColumnProjection::Nested(NestedProjection {
+                paths,
+                missing_path_policy,
+            }),
         }
     }
 
     pub fn nested_paths(&self) -> &[NestedPath] {
-        &self.nested_paths
+        match &self.projection {
+            ColumnProjection::Full => &[],
+            ColumnProjection::Nested(nested) => nested.paths.paths(),
+        }
+    }
+
+    pub fn nested_path_read_strategy(&self) -> NestedReadStrategy {
+        match &self.projection {
+            ColumnProjection::Full => NestedReadStrategy::Prefix,
+            ColumnProjection::Nested(nested) => nested.missing_path_policy.into(),
+        }
+    }
+
+    pub fn into_nested_paths_and_strategy(self) -> (Vec<NestedPath>, NestedReadStrategy) {
+        match self.projection {
+            ColumnProjection::Full => (vec![], NestedReadStrategy::Prefix),
+            ColumnProjection::Nested(nested) => {
+                (nested.paths.into_vec(), nested.missing_path_policy.into())
+            }
+        }
     }
 
     pub fn with_nested_path_read_strategy(
         mut self,
         nested_path_read_strategy: NestedReadStrategy,
     ) -> Self {
-        self.nested_path_read_strategy = nested_path_read_strategy;
+        if let ColumnProjection::Nested(nested) = &mut self.projection {
+            nested.missing_path_policy = nested_path_read_strategy.into();
+        }
         self
+    }
+
+    pub fn merge_nested_paths(
+        &mut self,
+        nested_paths: Vec<NestedPath>,
+        nested_path_read_strategy: NestedReadStrategy,
+    ) {
+        if nested_paths.is_empty() {
+            self.projection = ColumnProjection::Full;
+            return;
+        }
+
+        match &mut self.projection {
+            ColumnProjection::Full => {
+                self.projection = ColumnProjection::Nested(NestedProjection {
+                    paths: NestedPathSet::new(nested_paths),
+                    missing_path_policy: nested_path_read_strategy.into(),
+                });
+            }
+            ColumnProjection::Nested(nested) => {
+                nested.paths.merge(nested_paths);
+                nested.missing_path_policy = nested
+                    .missing_path_policy
+                    .merge(nested_path_read_strategy.into());
+            }
+        }
     }
 
     pub fn estimated_size(&self) -> usize {
         mem::size_of::<ColumnId>()
-            + self.nested_paths.capacity() * mem::size_of::<NestedPath>()
-            + self
-                .nested_paths
-                .iter()
-                .map(|path| {
-                    path.capacity() * mem::size_of::<String>()
-                        + path.iter().map(|node| node.capacity()).sum::<usize>()
-                })
-                .sum::<usize>()
+            + match &self.projection {
+                ColumnProjection::Full => 0,
+                ColumnProjection::Nested(nested) => {
+                    nested.paths.paths.capacity() * mem::size_of::<NestedPath>()
+                        + nested
+                            .paths
+                            .paths
+                            .iter()
+                            .map(|path| {
+                                path.capacity() * mem::size_of::<String>()
+                                    + path.iter().map(|node| node.capacity()).sum::<usize>()
+                            })
+                            .sum::<usize>()
+                }
+            }
     }
 }
 
 pub fn merge(a: ReadColumns, b: ReadColumns) -> ReadColumns {
-    let mut merged = BTreeMap::<ColumnId, (Vec<NestedPath>, NestedReadStrategy)>::new();
+    let mut merged = BTreeMap::<ColumnId, ColumnProjection>::new();
 
     for col in a.cols.into_iter().chain(b.cols) {
-        if let Some((nested_paths, nested_path_read_strategy)) = merged.get_mut(&col.column_id) {
-            *nested_path_read_strategy =
-                nested_path_read_strategy.merge(col.nested_path_read_strategy);
-            if nested_paths.is_empty() || col.nested_paths.is_empty() {
-                *nested_paths = vec![];
-            } else {
-                merge_nested_paths(nested_paths, col.nested_paths);
-            }
+        if let Some(projection) = merged.get_mut(&col.column_id) {
+            merge_column_projection(projection, col.projection);
             continue;
         }
 
-        merged.insert(
-            col.column_id,
-            (
-                normalize_nested_paths(col.nested_paths),
-                col.nested_path_read_strategy,
-            ),
-        );
+        merged.insert(col.column_id, normalize_column_projection(col.projection));
     }
 
     ReadColumns {
         cols: merged
             .into_iter()
-            .map(
-                |(column_id, (nested_paths, nested_path_read_strategy))| ReadColumn {
-                    column_id,
-                    nested_paths,
-                    nested_path_read_strategy,
-                },
-            )
+            .map(|(column_id, projection)| ReadColumn {
+                column_id,
+                projection,
+            })
             .collect(),
     }
 }
 
-fn normalize_nested_paths(nested_paths: Vec<NestedPath>) -> Vec<NestedPath> {
-    NestedPathSet::new(nested_paths).into_vec()
+fn normalize_column_projection(projection: ColumnProjection) -> ColumnProjection {
+    match projection {
+        ColumnProjection::Full => ColumnProjection::Full,
+        ColumnProjection::Nested(mut nested) => {
+            nested.paths = NestedPathSet::new(nested.paths.into_vec());
+            ColumnProjection::Nested(nested)
+        }
+    }
 }
 
-pub(crate) fn merge_nested_paths(merged: &mut Vec<NestedPath>, incoming: Vec<NestedPath>) {
-    let mut set = NestedPathSet::new(mem::take(merged));
-    set.merge(incoming);
-    *merged = set.into_vec();
+fn merge_column_projection(merged: &mut ColumnProjection, incoming: ColumnProjection) {
+    match (&mut *merged, incoming) {
+        (ColumnProjection::Full, _) | (_, ColumnProjection::Full) => {
+            *merged = ColumnProjection::Full;
+        }
+        (ColumnProjection::Nested(merged), ColumnProjection::Nested(incoming)) => {
+            merged.paths.merge(incoming.paths.into_vec());
+            merged.missing_path_policy = merged
+                .missing_path_policy
+                .merge(incoming.missing_path_policy);
+        }
+    }
 }
 
 /// Build [`ReadColumns`] from [`ProjectionInput`].
@@ -354,11 +460,7 @@ pub fn read_columns_from_projection(
             .remove(&col.column_schema.name)
             .unwrap_or_default();
 
-        read_cols.push(ReadColumn {
-            column_id: col_id,
-            nested_paths,
-            nested_path_read_strategy: NestedReadStrategy::Prefix,
-        });
+        read_cols.push(ReadColumn::new(col_id, nested_paths));
     }
 
     Ok(ReadColumns { cols: read_cols })
