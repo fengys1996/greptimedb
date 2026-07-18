@@ -34,11 +34,11 @@ use futures::TryStreamExt;
 use serde_json::json;
 use store_api::region_engine::{PrepareRequest, RegionEngine, RegionScanner};
 use store_api::region_request::RegionRequest;
-use store_api::storage::{ProjectionInput, RegionId, ScanRequest, TimeSeriesDistribution};
+use store_api::storage::{RegionId, ScanRequest, TimeSeriesDistribution};
 
 use crate::config::MitoConfig;
 use crate::error::Error;
-use crate::read::read_columns::{ReadColumn, ReadColumns};
+use crate::read::read_columns::{MissingPathPolicy, NestedPathSet, ReadColumn, ReadColumns};
 use crate::read::scan_region::Scanner;
 use crate::test_util;
 use crate::test_util::{CreateRequestBuilder, TestEnv};
@@ -102,7 +102,7 @@ async fn test_json_type_hint_pushdown_scanner_returns_batches() -> WhateverResul
     // nested physical path is needed.
 
     let request = ScanRequest {
-        projection_input: Some(ProjectionInput::new(vec![1, 0])),
+        projection: Some(vec![1, 0]),
         json_type_hint: HashMap::from([(
             "field_0".to_string(),
             JsonNativeType::Object(JsonObjectType::from([(
@@ -125,15 +125,13 @@ async fn test_json_type_hint_pushdown_scanner_returns_batches() -> WhateverResul
         seq_scan.input().read_cols,
         ReadColumns {
             cols: vec![
-                ReadColumn::new(0, vec![]),
-                ReadColumn::new(
-                    1,
-                    vec![vec![
-                        "field_0".to_string(),
+                ReadColumn::new(0),
+                ReadColumn::new(1)
+                    .with_nested_projection(NestedPathSet::new(vec![vec![
                         "a".to_string(),
                         "x".to_string()
-                    ]]
-                ),
+                    ]]))
+                    .with_missing_path_policy(MissingPathPolicy::FallbackToNearestVariantParent),
             ]
         }
     );

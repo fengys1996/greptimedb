@@ -2481,10 +2481,10 @@ mod tests {
         // Ask Parquet to read only the deepest requested JSON2 path. This should select the single
         // leaf j.a.x and avoid both sibling leaves j.a.y and j.b.
 
-        let projection =
-            ParquetReadColumns::from_deduped(vec![ParquetReadColumn::new(0).with_nested_paths(
-                vec![vec!["j".to_string(), "a".to_string(), "x".to_string()]],
-            )]);
+        let projection = ParquetReadColumns::from_deduped(vec![
+            ParquetReadColumn::new(0)
+                .with_nested_paths(vec![vec!["a".to_string(), "x".to_string()]]),
+        ]);
         let projection_plan = build_projection_plan(&projection, parquet_schema);
         assert_eq!(vec![true], projection_plan.projected_root_presence);
         assert_eq!(

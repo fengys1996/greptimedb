@@ -41,12 +41,12 @@ use futures::StreamExt;
 use itertools::Itertools;
 use partition::expr::PartitionExpr;
 use smallvec::SmallVec;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::region_engine::{PartitionRange, RegionScannerRef};
 use store_api::storage::{
-    NestedPath, RegionId, ScanRequest, SequenceNumber, SequenceRange, TimeSeriesDistribution,
-    TimeSeriesRowSelector,
+    ColumnId, NestedPath, RegionId, ScanRequest, SequenceNumber, SequenceRange,
+    TimeSeriesDistribution, TimeSeriesRowSelector,
 };
 use table::predicate::{Predicate, build_time_range_predicate, extract_time_range_from_expr};
 use tokio::sync::{Semaphore, mpsc};
@@ -55,7 +55,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheStrategy;
 use crate::config::DEFAULT_MAX_CONCURRENT_SCAN_FILES;
-use crate::error::{InvalidPartitionExprSnafu, Result};
+use crate::error::{InvalidPartitionExprSnafu, InvalidRequestSnafu, Result};
 #[cfg(feature = "enterprise")]
 use crate::extension::{BoxedExtensionRange, BoxedExtensionRangeProvider};
 use crate::memtable::{MemtableRange, RangesOptions};
@@ -64,10 +64,7 @@ use crate::read::compat::{self, FlatCompatBatch};
 use crate::read::flat_projection::FlatProjectionMapper;
 use crate::read::range::{FileRangeBuilder, MemRangeBuilder, RangeMeta, RowGroupIndex};
 use crate::read::range_cache::{ScanRequestFingerprint, implied_time_range_from_exprs};
-use crate::read::read_columns::{
-    NestedReadStrategy, ReadColumns, merge, read_columns_from_predicate,
-    read_columns_from_projection,
-};
+use crate::read::read_columns::{ColumnProjection, NestedPathSet, NestedProjection, ReadColumns};
 use crate::read::seq_scan::SeqScan;
 use crate::read::series_scan::SeriesScan;
 use crate::read::stream::ScanBatchStream;
@@ -420,25 +417,10 @@ impl ScanRegion {
         let time_range = self.build_time_range_predicate();
         let predicate = PredicateGroup::new(&self.version.metadata, &self.request.filters)?;
 
-        let mut read_cols = match &self.request.projection_input {
-            Some(p) => {
-                // Read columns include the pushed-down projection and columns
-                // resolved from the predicate.
-                let metadata = &self.version.metadata;
-                let from_projection = read_columns_from_projection(p.clone(), metadata)?;
-                let from_predicate = read_columns_from_predicate(&predicate, metadata);
-                merge(from_projection, from_predicate)
-            }
-            None => {
-                let read_col_ids = self
-                    .version
-                    .metadata
-                    .column_metadatas
-                    .iter()
-                    .map(|col| col.column_id);
-                ReadColumns::from_deduped_column_ids(read_col_ids)
-            }
-        };
+        let read_col_ids =
+            self.build_read_col_ids(self.request.projection.as_deref(), &predicate)?;
+        let mut read_cols = ReadColumns::from_deduped_column_ids(read_col_ids);
+
         // Only narrow read columns and pass JSON type hints for structured JSON (JSON2)
         // columns. Legacy JSONB columns have JSON extension metadata but their physical
         // Arrow type is Binary, not Struct, so they must not enter structured JSON paths.
@@ -462,8 +444,8 @@ impl ScanRegion {
         // The mapper always computes projected column ids as the schema of SSTs may change.
         let projection = self
             .request
-            .projection_indices()
-            .map(|x| x.to_vec())
+            .projection
+            .clone()
             .unwrap_or_else(|| (0..self.version.metadata.column_metadatas.len()).collect());
         let json_type_hint = has_structured_json
             .then_some(&self.request.json_type_hint)
@@ -623,6 +605,87 @@ impl ScanRegion {
             input
         };
         Ok(input)
+    }
+
+    /// Builds root column ids required by DataFusion-pushed projection and predicate.
+    fn build_read_col_ids(
+        &self,
+        projection: Option<&[usize]>,
+        predicate: &PredicateGroup,
+    ) -> Result<Vec<ColumnId>> {
+        let Some(projection) = projection else {
+            return Ok(self
+                .version
+                .metadata
+                .column_metadatas
+                .iter()
+                .map(|col| col.column_id)
+                .collect());
+        };
+
+        let metadata = &self.version.metadata;
+        let mut read_col_ids = Vec::new();
+        let mut seen = HashSet::new();
+        for idx in projection {
+            let col_id = metadata
+                .column_metadatas
+                .get(*idx)
+                .with_context(|| InvalidRequestSnafu {
+                    region_id: metadata.region_id,
+                    reason: format!("projection index {} is out of bound", idx),
+                })?
+                .column_id;
+            let inserted = seen.insert(col_id);
+            debug_assert!(
+                inserted,
+                "projection contains duplicate column id: {}",
+                col_id
+            );
+            // Keep the projection order.
+            read_col_ids.push(col_id);
+        }
+
+        if projection.is_empty() {
+            let time_index = metadata.time_index_column().column_id;
+            if seen.insert(time_index) {
+                read_col_ids.push(time_index);
+            }
+        }
+
+        let mut extra_col_names = HashSet::new();
+        let mut cols = HashSet::new();
+
+        if let Some(p) = predicate.predicate_without_region() {
+            for expr in p.exprs() {
+                cols.clear();
+                if expr_to_columns(expr, &mut cols).is_err() {
+                    continue;
+                }
+                extra_col_names.extend(cols.iter().map(|col| col.name.clone()));
+            }
+        }
+
+        if let Some(expr) = predicate.region_partition_expr() {
+            expr.collect_column_names(&mut extra_col_names);
+        }
+
+        if !extra_col_names.is_empty() {
+            for col in &metadata.column_metadatas {
+                if extra_col_names.contains(&col.column_schema.name)
+                    && !seen.contains(&col.column_id)
+                {
+                    read_col_ids.push(col.column_id);
+                }
+                extra_col_names.remove(&col.column_schema.name);
+            }
+            if !extra_col_names.is_empty() {
+                warn!(
+                    "Some columns in filters are not found in region {}: {:?}",
+                    metadata.region_id, extra_col_names
+                );
+            }
+        }
+        Ok(read_col_ids)
     }
 
     fn region_id(&self) -> RegionId {
@@ -1480,7 +1543,7 @@ fn pre_filter_mode(append_mode: bool, merge_mode: MergeMode) -> PreFilterMode {
 }
 
 fn narrow_read_columns_by_json_type_hint(
-    read_columns: &mut ReadColumns,
+    read_cols: &mut ReadColumns,
     json_type_hint: &HashMap<String, JsonNativeType>,
     metadata: &RegionMetadata,
 ) {
@@ -1488,19 +1551,25 @@ fn narrow_read_columns_by_json_type_hint(
         return;
     }
 
-    for read_column in &mut read_columns.cols {
-        let Some(column) = metadata.column_by_id(read_column.column_id) else {
+    for read_col in &mut read_cols.cols {
+        let Some(col) = metadata.column_by_id(read_col.column_id) else {
             continue;
         };
-        let column_name = &column.column_schema.name;
-        let Some(json_type) = json_type_hint.get(column_name) else {
+        let col_name = &col.column_schema.name;
+        let Some(json_type) = json_type_hint.get(col_name) else {
             continue;
         };
 
         let mut paths = Vec::new();
-        let mut current = vec![column_name.clone()];
+        let mut current = Vec::new();
         collect_json_nested_paths(json_type, &mut current, &mut paths);
-        read_column.merge_nested_paths(paths, NestedReadStrategy::FallbackToNearestVariantParent);
+        let nested_path_set = NestedPathSet::new(paths);
+        // TODO(fys): refine the following code.
+        read_col.projection = ColumnProjection::Nested(NestedProjection {
+            paths: nested_path_set,
+            missing_path_policy:
+                super::read_columns::MissingPathPolicy::FallbackToNearestVariantParent,
+        });
     }
 }
 
@@ -2033,7 +2102,7 @@ mod tests {
     use crate::cache::CacheManager;
     use crate::error::InvalidMetadataSnafu;
     use crate::read::range_cache::ScanRequestFingerprintBuilder;
-    use crate::read::read_columns::ReadColumn;
+    use crate::read::read_columns::{MissingPathPolicy, NestedPathSet, ReadColumn};
     use crate::sst::file::FileMeta;
     use crate::test_util::memtable_util::metadata_with_primary_key;
     use crate::test_util::scheduler_util::SchedulerEnv;
@@ -2172,33 +2241,34 @@ mod tests {
         }
 
         let mut read_columns = ReadColumns {
-            cols: vec![ReadColumn::new(1, vec![]), ReadColumn::new(0, vec![])],
+            cols: vec![ReadColumn::new(1), ReadColumn::new(0)],
         };
         narrow_read_columns_by_json_type_hint(&mut read_columns, &hint, metadata.as_ref());
         assert_eq!(
             read_columns,
             ReadColumns {
                 cols: vec![
-                    ReadColumn::new(
-                        1,
-                        vec![nested_path(&["j", "a"]), nested_path(&["j", "b", "c"])]
-                    )
-                    .with_nested_path_read_strategy(
-                        NestedReadStrategy::FallbackToNearestVariantParent
-                    ),
-                    ReadColumn::new(0, vec![])
+                    ReadColumn::new(1)
+                        .with_nested_projection(NestedPathSet::new(vec![
+                            nested_path(&["a"]),
+                            nested_path(&["b", "c"]),
+                        ]))
+                        .with_missing_path_policy(
+                            MissingPathPolicy::FallbackToNearestVariantParent
+                        ),
+                    ReadColumn::new(0)
                 ]
             }
         );
 
         let mut read_columns = ReadColumns {
-            cols: vec![ReadColumn::new(0, vec![])],
+            cols: vec![ReadColumn::new(0)],
         };
         narrow_read_columns_by_json_type_hint(&mut read_columns, &hint, metadata.as_ref());
         assert_eq!(
             read_columns,
             ReadColumns {
-                cols: vec![ReadColumn::new(0, vec![])]
+                cols: vec![ReadColumn::new(0)]
             }
         );
         Ok(())

@@ -12,17 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::mem;
 
-use datafusion_common::HashMap;
-use datafusion_expr::utils::expr_to_columns;
-use snafu::OptionExt;
-use store_api::metadata::RegionMetadataRef;
-use store_api::storage::{ColumnId, NestedPath, ProjectionInput};
-
-use crate::error::{InvalidRequestSnafu, Result};
-use crate::read::scan_region::PredicateGroup;
+use store_api::storage::{ColumnId, NestedPath};
 
 /// Logical columns to read from a region.
 ///
@@ -31,7 +24,7 @@ use crate::read::scan_region::PredicateGroup;
 /// which represents the root column in the storage schema.
 ///
 /// Nested fields under the column are specified by [`NestedPath`] entries.
-/// Each path includes the root column name as its first element.
+/// Each path is relative to the root column.
 ///
 /// For example, assume column id `9` corresponds to a root column named `j`
 /// with nested fields:
@@ -50,13 +43,10 @@ use crate::read::scan_region::PredicateGroup;
 /// may produce read columns like:
 ///
 /// ```text
-/// ReadColumn::new(
-///     9,
-///     vec![
-///         vec!["j".to_string(), "a".to_string()],
-///         vec!["j".to_string(), "b".to_string(), "c".to_string()],
-///     ],
-/// )
+/// ReadColumn::new(9).with_nested_projection(NestedPathSet::new(vec![
+///         vec!["a".to_string()],
+///         vec!["b".to_string(), "c".to_string()],
+///     ]))
 /// ```
 ///
 /// If [`ColumnProjection::Full`] is used, the whole column will be read.
@@ -70,10 +60,7 @@ impl ReadColumns {
     where
         I: IntoIterator<Item = ColumnId>,
     {
-        let cols = column_ids
-            .into_iter()
-            .map(|col_id| ReadColumn::new(col_id, vec![]))
-            .collect();
+        let cols = column_ids.into_iter().map(ReadColumn::new).collect();
         ReadColumns { cols }
     }
 
@@ -248,37 +235,26 @@ impl NestedReadStrategy {
 }
 
 impl ReadColumn {
-    pub fn new(column_id: ColumnId, nested_paths: Vec<NestedPath>) -> Self {
-        if nested_paths.is_empty() {
-            return Self::full(column_id);
-        }
-
-        Self::nested(
-            column_id,
-            NestedPathSet::new(nested_paths),
-            MissingPathPolicy::PrefixOnly,
-        )
-    }
-
-    pub fn full(column_id: ColumnId) -> Self {
+    pub fn new(column_id: ColumnId) -> Self {
         Self {
             column_id,
             projection: ColumnProjection::Full,
         }
     }
 
-    pub fn nested(
-        column_id: ColumnId,
-        paths: NestedPathSet,
-        missing_path_policy: MissingPathPolicy,
-    ) -> Self {
-        Self {
-            column_id,
-            projection: ColumnProjection::Nested(NestedProjection {
-                paths,
-                missing_path_policy,
-            }),
+    pub fn with_nested_projection(mut self, paths: NestedPathSet) -> Self {
+        self.projection = ColumnProjection::Nested(NestedProjection {
+            paths,
+            missing_path_policy: MissingPathPolicy::PrefixOnly,
+        });
+        self
+    }
+
+    pub fn with_missing_path_policy(mut self, missing_path_policy: MissingPathPolicy) -> Self {
+        if let ColumnProjection::Nested(nested) = &mut self.projection {
+            nested.missing_path_policy = missing_path_policy;
         }
+        self
     }
 
     pub fn nested_paths(&self) -> &[NestedPath] {
@@ -295,15 +271,6 @@ impl ReadColumn {
         }
     }
 
-    pub fn into_nested_paths_and_strategy(self) -> (Vec<NestedPath>, NestedReadStrategy) {
-        match self.projection {
-            ColumnProjection::Full => (vec![], NestedReadStrategy::Prefix),
-            ColumnProjection::Nested(nested) => {
-                (nested.paths.into_vec(), nested.missing_path_policy.into())
-            }
-        }
-    }
-
     pub fn with_nested_path_read_strategy(
         mut self,
         nested_path_read_strategy: NestedReadStrategy,
@@ -312,32 +279,6 @@ impl ReadColumn {
             nested.missing_path_policy = nested_path_read_strategy.into();
         }
         self
-    }
-
-    pub fn merge_nested_paths(
-        &mut self,
-        nested_paths: Vec<NestedPath>,
-        nested_path_read_strategy: NestedReadStrategy,
-    ) {
-        if nested_paths.is_empty() {
-            self.projection = ColumnProjection::Full;
-            return;
-        }
-
-        match &mut self.projection {
-            ColumnProjection::Full => {
-                self.projection = ColumnProjection::Nested(NestedProjection {
-                    paths: NestedPathSet::new(nested_paths),
-                    missing_path_policy: nested_path_read_strategy.into(),
-                });
-            }
-            ColumnProjection::Nested(nested) => {
-                nested.paths.merge(nested_paths);
-                nested.missing_path_policy = nested
-                    .missing_path_policy
-                    .merge(nested_path_read_strategy.into());
-            }
-        }
     }
 
     pub fn estimated_size(&self) -> usize {
@@ -407,420 +348,29 @@ fn merge_column_projection(merged: &mut ColumnProjection, incoming: ColumnProjec
     }
 }
 
-/// Build [`ReadColumns`] from [`ProjectionInput`].
-///
-/// Note: If `projection.projection` is empty, this function still reads the
-/// time index column so the scan can preserve row counts for empty-output
-/// queries such as `SELECT COUNT(*)`.
-///
-/// Order:
-/// - This function keeps the first-seen order from `projection.projection`
-///   (duplicate indices are skipped).
-/// - Keeping a stable order makes [`ReadColumns`] comparisons deterministic
-///   (`Eq`/`Hash`) and avoids cache-key instability in upper layers.
-pub fn read_columns_from_projection(
-    projection: ProjectionInput,
-    metadata: &RegionMetadataRef,
-) -> Result<ReadColumns> {
-    let root_indices = if projection.projection.is_empty() {
-        vec![metadata.time_index_column_pos()]
-    } else {
-        projection.projection
-    };
-
-    let mut paths_by_col: HashMap<String, Vec<NestedPath>> =
-        HashMap::with_capacity(projection.nested_paths.len());
-    for path in projection.nested_paths {
-        let Some((root_name, _)) = path.split_first() else {
-            continue;
-        };
-        paths_by_col
-            .entry(root_name.clone())
-            .or_default()
-            .push(path);
-    }
-
-    let mut read_cols = Vec::with_capacity(root_indices.len());
-    let mut seen = HashSet::with_capacity(root_indices.len());
-    for root_idx in root_indices {
-        if !seen.insert(root_idx) {
-            continue;
-        }
-
-        let col = metadata
-            .column_metadatas
-            .get(root_idx)
-            .with_context(|| InvalidRequestSnafu {
-                region_id: metadata.region_id,
-                reason: format!("projection index {} is out of bounds", root_idx),
-            })?;
-        let col_id = col.column_id;
-
-        let nested_paths = paths_by_col
-            .remove(&col.column_schema.name)
-            .unwrap_or_default();
-
-        read_cols.push(ReadColumn::new(col_id, nested_paths));
-    }
-
-    Ok(ReadColumns { cols: read_cols })
-}
-
-/// Build [`ReadColumns`] from [`PredicateGroup`].
-///
-/// Order:
-/// - This function follows `metadata.column_metadatas` order when materializing
-///   columns from predicate-referenced names.
-/// - Using metadata order keeps the output deterministic for [`ReadColumns`]
-///   equality/hash checks and for cache keys derived from read columns.
-pub fn read_columns_from_predicate(
-    predicate: &PredicateGroup,
-    metadata: &RegionMetadataRef,
-) -> ReadColumns {
-    let mut root_names = HashSet::new();
-    let mut columns = HashSet::new();
-
-    if let Some(p) = predicate.predicate_without_region() {
-        for expr in p.exprs() {
-            columns.clear();
-            if expr_to_columns(expr, &mut columns).is_err() {
-                continue;
-            }
-            root_names.extend(columns.drain().map(|column| column.name));
-        }
-    }
-
-    if let Some(expr) = predicate.region_partition_expr() {
-        expr.collect_column_names(&mut root_names);
-    }
-
-    // TODO(fys): Parse nested paths from predicate expressions and attach them
-    // to read columns instead of always reading the whole root column.
-    let mut cols = Vec::with_capacity(root_names.len());
-    for column in &metadata.column_metadatas {
-        if root_names.contains(&column.column_schema.name) {
-            cols.push(ReadColumn::new(column.column_id, vec![]));
-        }
-    }
-
-    ReadColumns { cols }
-}
-
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
-    use api::v1::SemanticType;
-    use datafusion_expr::{col, lit};
-    use datatypes::prelude::ConcreteDataType;
-    use datatypes::schema::ColumnSchema;
-    use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
-    use store_api::storage::RegionId;
-
     use super::*;
-
-    #[test]
-    fn test_read_columns_from_empty_projection() {
-        let metadata = new_test_metadata();
-
-        let read_columns =
-            read_columns_from_projection(ProjectionInput::default(), &metadata).unwrap();
-
-        let expected = ReadColumns {
-            cols: vec![ReadColumn::new(2, vec![])],
-        };
-        assert_eq!(expected, read_columns);
-
-        let projection_input =
-            ProjectionInput::new(vec![]).with_nested_paths(vec![vec!["1".to_string()]]);
-        let read_columns = read_columns_from_projection(projection_input, &metadata).unwrap();
-
-        let expected = ReadColumns {
-            cols: vec![ReadColumn::new(2, vec![])],
-        };
-        assert_eq!(expected, read_columns);
-    }
-
-    #[test]
-    fn test_read_columns_from_projection_with_nested_paths() {
-        let metadata = new_test_metadata();
-        let projection = ProjectionInput::new(vec![1, 0]).with_nested_paths(vec![
-            nested_path(&["field_0", "a"]),
-            nested_path(&["field_0", "b", "c"]),
-        ]);
-
-        let read_columns = read_columns_from_projection(projection, &metadata).unwrap();
-
-        let expected = ReadColumns {
-            cols: vec![
-                ReadColumn::new(
-                    3,
-                    vec![
-                        nested_path(&["field_0", "a"]),
-                        nested_path(&["field_0", "b", "c"]),
-                    ],
-                ),
-                ReadColumn::new(0, vec![]),
-            ],
-        };
-        assert_eq!(expected, read_columns,);
-    }
-
-    #[test]
-    fn test_read_columns_from_projection_dedups_duplicate_indices() {
-        let metadata = new_test_metadata();
-        let projection = ProjectionInput::new(vec![1, 1, 0]).with_nested_paths(vec![
-            nested_path(&["field_0", "a"]),
-            nested_path(&["field_0", "b", "c"]),
-        ]);
-
-        let read_columns = read_columns_from_projection(projection, &metadata).unwrap();
-
-        let expected = ReadColumns {
-            cols: vec![
-                ReadColumn::new(
-                    3,
-                    vec![
-                        nested_path(&["field_0", "a"]),
-                        nested_path(&["field_0", "b", "c"]),
-                    ],
-                ),
-                ReadColumn::new(0, vec![]),
-            ],
-        };
-        assert_eq!(expected, read_columns);
-    }
-
-    #[test]
-    fn test_read_columns_from_projection_out_of_bound() {
-        let metadata = new_test_metadata();
-        let projection = ProjectionInput::new(vec![3]);
-
-        let err = read_columns_from_projection(projection, &metadata).unwrap_err();
-
-        assert!(
-            err.to_string()
-                .contains("projection index 3 is out of bound")
-        );
-    }
-
-    #[test]
-    fn test_read_columns_from_predicate_reads_root_columns_only() {
-        let metadata = new_test_metadata();
-        let predicate = PredicateGroup::new(
-            metadata.as_ref(),
-            &[col("field_0").gt(lit(1)), col("tag_0").eq(lit("a"))],
-        )
-        .unwrap();
-
-        let read_columns = read_columns_from_predicate(&predicate, &metadata);
-
-        let expected = ReadColumns {
-            cols: vec![ReadColumn::new(0, vec![]), ReadColumn::new(3, vec![])],
-        };
-        assert_eq!(expected, read_columns);
-    }
-
-    #[test]
-    fn test_read_columns_from_predicate_empty() {
-        let metadata = new_test_metadata();
-        let predicate = PredicateGroup::new(metadata.as_ref(), &[]).unwrap();
-
-        let read_columns = read_columns_from_predicate(&predicate, &metadata);
-
-        assert!(read_columns.is_empty());
-    }
-
-    #[test]
-    fn test_merge_read_cols_with_only_root() {
-        let a = ReadColumns {
-            cols: vec![ReadColumn::new(3, vec![]), ReadColumn::new(1, vec![])],
-        };
-        let b = ReadColumns {
-            cols: vec![ReadColumn::new(2, vec![])],
-        };
-
-        let merged = merge(a, b);
-
-        assert_eq!(
-            merged,
-            ReadColumns {
-                cols: vec![
-                    ReadColumn::new(1, vec![]),
-                    ReadColumn::new(2, vec![]),
-                    ReadColumn::new(3, vec![]),
-                ],
-            }
-        );
-    }
-
-    #[test]
-    fn test_merge_read_cols_with_nested_paths() {
-        let a = ReadColumns {
-            cols: vec![ReadColumn::new(1, vec![nested_path(&["j", "a"])])],
-        };
-        let b = ReadColumns {
-            cols: vec![ReadColumn::new(
-                1,
-                vec![nested_path(&["j", "b"]), nested_path(&["j", "c"])],
-            )],
-        };
-
-        let merged = merge(a, b);
-
-        assert_eq!(
-            merged,
-            ReadColumns {
-                cols: vec![ReadColumn::new(
-                    1,
-                    vec![
-                        nested_path(&["j", "a"]),
-                        nested_path(&["j", "b"]),
-                        nested_path(&["j", "c"]),
-                    ],
-                )],
-            }
-        );
-    }
-
-    #[test]
-    fn test_merge_read_cols_with_column_override() {
-        let a = ReadColumns {
-            cols: vec![
-                ReadColumn::new(1, vec![nested_path(&["j", "a"])]),
-                ReadColumn::new(2, vec![nested_path(&["k", "b"])]),
-            ],
-        };
-        let b = ReadColumns {
-            cols: vec![
-                ReadColumn::new(1, vec![]),
-                ReadColumn::new(2, vec![nested_path(&["k", "b", "c"])]),
-            ],
-        };
-
-        let merged = merge(a, b);
-
-        assert_eq!(
-            merged,
-            ReadColumns {
-                cols: vec![
-                    ReadColumn::new(1, vec![]),
-                    ReadColumn::new(2, vec![nested_path(&["k", "b"])])
-                ],
-            }
-        );
-    }
-
-    #[test]
-    fn test_merge_read_cols_dedups_redundant_nested_paths() {
-        let a = ReadColumns {
-            cols: vec![ReadColumn::new(
-                1,
-                vec![
-                    nested_path(&["j", "a", "b"]),
-                    nested_path(&["j", "a"]),
-                    nested_path(&["j", "a", "b", "c"]),
-                ],
-            )],
-        };
-        let b = ReadColumns {
-            cols: vec![ReadColumn::new(1, vec![nested_path(&["j", "a"])])],
-        };
-
-        let merged = merge(a, b);
-
-        assert_eq!(
-            merged,
-            ReadColumns {
-                cols: vec![ReadColumn::new(1, vec![nested_path(&["j", "a"])])],
-            }
-        );
-    }
-
-    #[test]
-    fn test_merge_read_cols_keeps_fallback_strategy() {
-        let a = ReadColumns {
-            cols: vec![ReadColumn::new(1, vec![nested_path(&["j", "a"])])],
-        };
-        let b = ReadColumns {
-            cols: vec![
-                ReadColumn::new(1, vec![nested_path(&["j", "b"])]).with_nested_path_read_strategy(
-                    NestedReadStrategy::FallbackToNearestVariantParent,
-                ),
-            ],
-        };
-
-        let merged = merge(a, b);
-
-        assert_eq!(
-            ReadColumns {
-                cols: vec![
-                    ReadColumn::new(1, vec![nested_path(&["j", "a"]), nested_path(&["j", "b"])])
-                        .with_nested_path_read_strategy(
-                            NestedReadStrategy::FallbackToNearestVariantParent
-                        ),
-                ],
-            },
-            merged
-        );
-    }
 
     #[test]
     fn test_nested_path_set_parent_path_covers_children() {
         let set = NestedPathSet::new(vec![
-            nested_path(&["j", "a", "b"]),
-            nested_path(&["j", "a"]),
-            nested_path(&["j", "a", "c"]),
+            nested_path(&["a", "b"]),
+            nested_path(&["a"]),
+            nested_path(&["a", "c"]),
         ]);
 
-        assert_eq!(set.paths(), &[nested_path(&["j", "a"])]);
+        assert_eq!(set.paths(), &[nested_path(&["a"])]);
     }
 
     #[test]
     fn test_nested_path_set_skips_child_path_if_parent_exists() {
-        let mut set = NestedPathSet::new(vec![nested_path(&["j", "a"])]);
+        let mut set = NestedPathSet::new(vec![nested_path(&["a"])]);
 
-        set.insert(nested_path(&["j", "a", "b"]));
-        set.insert(nested_path(&["j", "b"]));
+        set.insert(nested_path(&["a", "b"]));
+        set.insert(nested_path(&["b"]));
 
-        assert_eq!(
-            set.paths(),
-            &[nested_path(&["j", "a"]), nested_path(&["j", "b"])]
-        );
-    }
-
-    fn new_test_metadata() -> RegionMetadataRef {
-        let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 1));
-        builder
-            .push_column_metadata(ColumnMetadata {
-                column_schema: ColumnSchema::new(
-                    "tag_0".to_string(),
-                    ConcreteDataType::string_datatype(),
-                    true,
-                ),
-                semantic_type: SemanticType::Tag,
-                column_id: 0,
-            })
-            .push_column_metadata(ColumnMetadata {
-                column_schema: ColumnSchema::new(
-                    "field_0".to_string(),
-                    ConcreteDataType::string_datatype(),
-                    true,
-                ),
-                semantic_type: SemanticType::Field,
-                column_id: 3,
-            })
-            .push_column_metadata(ColumnMetadata {
-                column_schema: ColumnSchema::new(
-                    "ts".to_string(),
-                    ConcreteDataType::timestamp_millisecond_datatype(),
-                    false,
-                ),
-                semantic_type: SemanticType::Timestamp,
-                column_id: 2,
-            });
-        builder.primary_key(vec![0]);
-        Arc::new(builder.build().unwrap())
+        assert_eq!(set.paths(), &[nested_path(&["a"]), nested_path(&["b"])]);
     }
 
     fn nested_path(parts: &[&str]) -> NestedPath {

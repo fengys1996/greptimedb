@@ -52,7 +52,7 @@ use store_api::storage::{ColumnId, SequenceNumber};
 use crate::error::{
     ConvertVectorSnafu, DecodeSnafu, InvalidRecordBatchSnafu, NewRecordBatchSnafu, Result,
 };
-use crate::read::read_columns::{NestedReadStrategy, ReadColumns};
+use crate::read::read_columns::{ColumnProjection, NestedReadStrategy, ReadColumns};
 use crate::read::{Batch, BatchBuilder, BatchColumn};
 use crate::sst::file::{FileMeta, FileTimeRange};
 use crate::sst::parquet::read_columns::{ParquetReadColumn, ParquetReadColumns};
@@ -605,8 +605,13 @@ impl FormatProjection {
                     .copied()
                     .map(|index_of_sst| {
                         let column_id = col.column_id;
-                        let (nested_paths, nested_path_read_strategy) =
-                            col.into_nested_paths_and_strategy();
+                        // TODO(fys): refine it.
+                        let (nested_paths, nested_path_read_strategy) = match col.projection {
+                            ColumnProjection::Full => (vec![], NestedReadStrategy::Prefix),
+                            ColumnProjection::Nested(nested) => {
+                                (nested.paths.into_vec(), nested.missing_path_policy.into())
+                            }
+                        };
                         (
                             column_id,
                             index_of_sst,
@@ -858,7 +863,7 @@ mod tests {
 
     use super::*;
     use crate::error::InvalidMetadataSnafu;
-    use crate::read::read_columns::ReadColumn;
+    use crate::read::read_columns::{NestedPathSet, ReadColumn};
     use crate::sst::parquet::flat_format::{
         FlatReadFormat, FlatWriteFormat, sequence_column_index, sst_column_id_indices,
     };
@@ -1070,19 +1075,16 @@ mod tests {
             &column_id_to_parquet_index,
             metadata.column_metadatas.len() + FIXED_POS_COLUMN_NUM,
             ReadColumns {
-                cols: vec![ReadColumn::new(
-                    4,
-                    vec![vec!["j".to_string(), "a".to_string()]],
-                )],
+                cols: vec![
+                    ReadColumn::new(4)
+                        .with_nested_projection(NestedPathSet::new(vec![vec!["a".to_string()]])),
+                ],
             },
         );
 
         let columns = projection.parquet_read_cols.columns();
         assert_eq!(1, columns[0].root_index());
-        assert_eq!(
-            &[vec!["j".to_string(), "a".to_string()]],
-            columns[0].nested_paths()
-        );
+        assert_eq!(&[vec!["a".to_string()]], columns[0].nested_paths());
         Ok(())
     }
 
