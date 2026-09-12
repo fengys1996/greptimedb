@@ -19,7 +19,7 @@ use std::task::{Context, Poll};
 use datafusion_common::cast_column;
 use datafusion_common::format::DEFAULT_CAST_OPTIONS;
 use datatypes::arrow::array::{ArrayRef, new_null_array};
-use datatypes::arrow::datatypes::{DataType, Field, FieldRef, SchemaRef};
+use datatypes::arrow::datatypes::{DataType, Field, FieldRef, Schema, SchemaRef};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::extension::json::{JsonMetadata, is_json2_extension_type};
 use datatypes::json::JsonSettings;
@@ -27,6 +27,7 @@ use datatypes::vectors::json::array::JsonArray;
 use datatypes::vectors::json::json2_physical_data_type;
 use futures::Stream;
 use futures::stream::BoxStream;
+use serde_json::from_str;
 use snafu::{ResultExt, ensure};
 
 use crate::error::{
@@ -37,66 +38,39 @@ use crate::sst::parquet::Json2TargetLayout;
 pub(crate) type ProjectedRecordBatchStream = BoxStream<'static, Result<RecordBatch>>;
 
 /// Specifies how JSON columns in a record batch are aligned.
-///
-/// Both modes use the output schema to restore missing root columns with null
-/// arrays. Schema alignment produces logical query fields; rewriting produces
-/// specified physical layouts, typically for compaction.
 #[derive(Debug)]
-pub(crate) enum JsonAlignTarget {
-    /// Aligns columns to the logical fields in the output schema.
+pub(crate) enum AlignMode {
+    /// Aligns JSON columns to the logical fields in the output schema.
     AlignToSchema,
-    /// Rewrites specified JSON columns to their target physical layouts.
+    /// Rewrites JSON columns to physical layouts, typically for compaction.
     Rewrite {
         /// Target layouts keyed by root column name, not nested field path.
+        ///
+        /// Only listed columns are rewritten. Other existing arrays are reused
+        /// unchanged and must already match their output field types.
+        /// An empty map therefore only fills missing roots.
         columns: HashMap<String, Json2TargetLayout>,
     },
 }
 
-/// Logical JSON settings and the physical layout to use when rewriting a column.
+/// Alignment mode with parsed rewrite metadata and validated target layouts.
 #[derive(Debug)]
-struct Json2LayoutRewriteSettings {
-    /// Logical settings applied when re-encoding JSON values.
-    logical_settings: JsonSettings,
-    /// Settings defining the target physical layout.
-    target_layout: JsonSettings,
+enum ResolvedAlignMode {
+    AlignToSchema,
+    Rewrite {
+        columns: HashMap<String, RewriteSettings>,
+    },
 }
 
-impl TryFrom<&Json2TargetLayout> for Json2LayoutRewriteSettings {
-    type Error = crate::error::Error;
-
-    fn try_from(layout: &Json2TargetLayout) -> Result<Self> {
-        let metadata =
-            serde_json::from_str::<JsonMetadata>(&layout.extension_metadata).map_err(|e| {
-                UnexpectedSnafu {
-                    reason: format!("invalid JSON2 extension metadata: {e}"),
-                }
-                .build()
-            })?;
-        Ok(Self {
-            logical_settings: metadata.into_json_settings(),
-            target_layout: layout.target_layout.clone(),
-        })
-    }
-}
-
-/// Aligns projected batches to the expected output schema for nested projections.
+/// Adapts Parquet record batches to the output schema expected by the reader.
 ///
-/// Background
-/// ----------
-/// Nested projection may ask parquet to read leaves under a root column. If none
-/// of the requested leaves exists in the current parquet file, parquet decoding
-/// omits the whole root from the physical [`RecordBatch`].
+/// Nested projection can return only part of a JSON2 column, or omit its root
+/// entirely when no requested leaves are read. This stream restores missing
+/// roots with null arrays of the expected types.
 ///
-/// In addition, after nested-path filtering, returned struct arrays may contain
-/// only a subset of fields. The current output schema is not pruned by nested
-/// paths, so physical struct fields can be a subset of the expected struct
-/// fields, and their nested schema can differ from the expected output schema.
-///
-/// To keep projected batches schema-consistent before entering upper readers:
-/// - Root-column presence alignment restores missing projected root columns by
-///   inserting root-level null arrays.
-/// - Nested struct alignment aligns struct arrays to the expected nested field
-///   layout.
+/// Existing JSON2 columns are aligned to the logical schema inferred from
+/// type hints or rewritten to the specified JSON2 physical layout, as selected by
+/// [`AlignMode`].
 #[derive(derive_more::Debug)]
 pub struct JsonSchemaAligner<S> {
     #[debug(skip)]
@@ -111,8 +85,8 @@ pub struct JsonSchemaAligner<S> {
     /// Whether all projected roots are present and the stream can pass batches
     /// through.
     all_roots_present: bool,
-    /// Parsed rewrite settings. `None` selects alignment to the output schema.
-    rewrite_columns: Option<HashMap<String, Json2LayoutRewriteSettings>>,
+    /// Alignment mode with parsed and validated rewrite settings.
+    mode: ResolvedAlignMode,
     /// The cache for whether incoming batches already match output schema.
     is_schema_matched: Option<bool>,
 }
@@ -127,7 +101,7 @@ where
         inner: S,
         projected_root_presence: Vec<bool>,
         output_schema: SchemaRef,
-        target: JsonAlignTarget,
+        mode: AlignMode,
     ) -> Result<JsonSchemaAligner<S>> {
         ensure!(
             projected_root_presence.len() == output_schema.fields().len(),
@@ -140,33 +114,7 @@ where
             }
         );
 
-        let rewrite_columns = if let JsonAlignTarget::Rewrite { columns } = target {
-            let mut rewrite_columns = HashMap::with_capacity(columns.len());
-            for (name, layout) in columns {
-                let settings = Json2LayoutRewriteSettings::try_from(&layout)?;
-                let field = output_schema.field_with_name(&name).map_err(|_| {
-                    UnexpectedSnafu {
-                        reason: format!(
-                            "JSON2 rewrite column '{name}' is missing from output schema"
-                        ),
-                    }
-                    .build()
-                })?;
-                ensure!(
-                    is_json2_extension_type(field)
-                        && field.data_type() == &json2_physical_data_type(&settings.target_layout),
-                    UnexpectedSnafu {
-                        reason: format!(
-                            "JSON2 rewrite layout for column '{name}' does not match output field"
-                        ),
-                    }
-                );
-                rewrite_columns.insert(name, settings);
-            }
-            Some(rewrite_columns)
-        } else {
-            None
-        };
+        let mode = resolve_align_mode(mode, output_schema.as_ref())?;
 
         let expected_input_col_num = projected_root_presence
             .iter()
@@ -179,7 +127,7 @@ where
             projected_root_presence,
             expected_input_col_num,
             all_roots_present,
-            rewrite_columns,
+            mode,
             is_schema_matched: None,
         })
     }
@@ -196,7 +144,7 @@ where
 
         match Pin::new(&mut this.inner).poll_next(cx) {
             Poll::Ready(Some(Ok(rb))) => {
-                let is_schema_matched = this.rewrite_columns.is_none()
+                let is_schema_matched = matches!(this.mode, ResolvedAlignMode::AlignToSchema)
                     && this.all_roots_present
                     && *this
                         .is_schema_matched
@@ -210,7 +158,7 @@ where
                         &this.output_schema,
                         &this.projected_root_presence,
                         this.expected_input_col_num,
-                        this.rewrite_columns.as_ref(),
+                        &this.mode,
                     )))
                 }
             }
@@ -226,7 +174,7 @@ fn align_projected_batch(
     output_schema: &SchemaRef,
     projected_root_presence: &[bool],
     expected_input_col_num: usize,
-    rewrite_columns: Option<&HashMap<String, Json2LayoutRewriteSettings>>,
+    mode: &ResolvedAlignMode,
 ) -> Result<RecordBatch> {
     ensure!(
         rb.columns().len() == expected_input_col_num,
@@ -249,12 +197,16 @@ fn align_projected_batch(
             continue;
         }
 
-        cols.push(align_array(
-            rb.column(idx),
-            input_schema.field(idx),
-            field,
-            rewrite_columns.and_then(|columns| columns.get(field.name())),
-        )?);
+        let array = match mode {
+            ResolvedAlignMode::AlignToSchema => {
+                align_array(rb.column(idx), input_schema.field(idx), field)?
+            }
+            ResolvedAlignMode::Rewrite { columns } => match columns.get(field.name()) {
+                Some(settings) => rewrite_array(rb.column(idx), input_schema.field(idx), settings)?,
+                None => rb.column(idx).clone(),
+            },
+        };
+        cols.push(array);
         idx += 1;
     }
 
@@ -265,17 +217,7 @@ fn align_array(
     source_array: &ArrayRef,
     source_field: &Field,
     target_field: &FieldRef,
-    rewrite_settings: Option<&Json2LayoutRewriteSettings>,
 ) -> Result<ArrayRef> {
-    if let Some(settings) = rewrite_settings {
-        return JsonArray::from(source_array)
-            .rewrite_to_v2(
-                source_field,
-                &settings.logical_settings,
-                &settings.target_layout,
-            )
-            .context(DataTypeMismatchSnafu);
-    }
     if source_array.data_type() == target_field.data_type() {
         return Ok(source_array.clone());
     }
@@ -296,6 +238,82 @@ fn align_array(
     }
 
     cast_column(source_array, target_field.as_ref(), &DEFAULT_CAST_OPTIONS).context(CastColumnSnafu)
+}
+
+fn rewrite_array(
+    source_array: &ArrayRef,
+    source_field: &Field,
+    settings: &RewriteSettings,
+) -> Result<ArrayRef> {
+    JsonArray::from(source_array)
+        .rewrite_to_v2(
+            source_field,
+            &settings.logical_settings,
+            &settings.target_layout,
+        )
+        .context(DataTypeMismatchSnafu)
+}
+
+/// Resolved settings for rewriting one JSON2 column to a target physical layout.
+///
+/// Created from [`Json2TargetLayout`] when resolving the alignment mode, so
+/// extension metadata is parsed once and reused across batches.
+#[derive(Debug)]
+struct RewriteSettings {
+    /// Logical settings parsed from extension metadata and applied to JSON values
+    /// before encoding them into the target layout.
+    logical_settings: JsonSettings,
+    /// Settings defining the physical Arrow layout of the rewritten column.
+    target_layout: JsonSettings,
+}
+
+impl TryFrom<&Json2TargetLayout> for RewriteSettings {
+    type Error = crate::error::Error;
+
+    fn try_from(layout: &Json2TargetLayout) -> Result<Self> {
+        let metadata = from_str::<JsonMetadata>(&layout.extension_metadata).map_err(|e| {
+            UnexpectedSnafu {
+                reason: format!("invalid JSON2 extension metadata: {e}"),
+            }
+            .build()
+        })?;
+        Ok(Self {
+            logical_settings: metadata.into_json_settings(),
+            target_layout: layout.target_layout.clone(),
+        })
+    }
+}
+
+/// Parses rewrite metadata and validates target layouts against the output schema.
+fn resolve_align_mode(mode: AlignMode, output_schema: &Schema) -> Result<ResolvedAlignMode> {
+    let AlignMode::Rewrite { columns } = mode else {
+        return Ok(ResolvedAlignMode::AlignToSchema);
+    };
+
+    let mut rewrite_columns = HashMap::with_capacity(columns.len());
+    for (name, layout) in columns {
+        let settings = RewriteSettings::try_from(&layout)?;
+        let field = output_schema.field_with_name(&name).map_err(|_| {
+            UnexpectedSnafu {
+                reason: format!("JSON2 rewrite column '{name}' is missing from output schema"),
+            }
+            .build()
+        })?;
+        ensure!(
+            is_json2_extension_type(field)
+                && field.data_type() == &json2_physical_data_type(&settings.target_layout),
+            UnexpectedSnafu {
+                reason: format!(
+                    "JSON2 rewrite layout for column '{name}' does not match output field"
+                ),
+            }
+        );
+        rewrite_columns.insert(name, settings);
+    }
+
+    Ok(ResolvedAlignMode::Rewrite {
+        columns: rewrite_columns,
+    })
 }
 
 #[cfg(test)]
@@ -334,11 +352,14 @@ mod tests {
                 Field::new("j", json2_physical_data_type(&target_layout), true)
                     .with_extension_type(Json2ExtensionType::default()),
             ]),
-            JsonAlignTarget::Rewrite {
+            AlignMode::Rewrite {
                 columns: rewrite_targets,
             },
         )?;
-        let settings = &aligner.rewrite_columns.as_ref().unwrap()["j"];
+        let ResolvedAlignMode::Rewrite { columns } = &aligner.mode else {
+            panic!("expected rewrite mode");
+        };
+        let settings = &columns["j"];
         assert_eq!(logical_settings, settings.logical_settings);
         assert_eq!(target_layout, settings.target_layout);
         Ok(())
@@ -361,7 +382,7 @@ mod tests {
             stream,
             vec![true, true],
             output_schema.clone(),
-            JsonAlignTarget::AlignToSchema,
+            AlignMode::AlignToSchema,
         )
         .unwrap();
         let output = aligner.next().await.unwrap().unwrap();
@@ -385,7 +406,7 @@ mod tests {
             stream,
             vec![true, false, false],
             output_schema.clone(),
-            JsonAlignTarget::AlignToSchema,
+            AlignMode::AlignToSchema,
         )
         .unwrap();
         let output = aligner.next().await.unwrap().unwrap();
@@ -427,7 +448,7 @@ mod tests {
             stream,
             vec![true, false],
             output_schema.clone(),
-            JsonAlignTarget::AlignToSchema,
+            AlignMode::AlignToSchema,
         )
         .unwrap();
         let output = aligner.next().await.unwrap().unwrap();
@@ -447,7 +468,7 @@ mod tests {
             stream,
             vec![true, false],
             output_schema,
-            JsonAlignTarget::AlignToSchema,
+            AlignMode::AlignToSchema,
         ) {
             Ok(_) => panic!("JsonSchemaAligner should reject projection length mismatch"),
             Err(err) => err,
@@ -474,7 +495,7 @@ mod tests {
             stream,
             vec![true, true, false],
             output_schema,
-            JsonAlignTarget::AlignToSchema,
+            AlignMode::AlignToSchema,
         )
         .unwrap();
         let err = aligner.next().await.unwrap().unwrap_err();
@@ -512,7 +533,7 @@ mod tests {
             stream::iter([Ok(input)]),
             vec![true],
             output_schema.clone(),
-            JsonAlignTarget::AlignToSchema,
+            AlignMode::AlignToSchema,
         )
         .unwrap();
         let output = aligner.next().await.unwrap().unwrap();
@@ -565,7 +586,7 @@ mod tests {
             stream::iter([Ok(input)]),
             vec![true],
             output_schema.clone(),
-            JsonAlignTarget::AlignToSchema,
+            AlignMode::AlignToSchema,
         )
         .unwrap();
         let output = aligner.next().await.unwrap().unwrap();
@@ -658,7 +679,7 @@ mod tests {
             stream::iter([Ok(input)]),
             vec![true],
             output_schema.clone(),
-            JsonAlignTarget::AlignToSchema,
+            AlignMode::AlignToSchema,
         )
         .unwrap();
         let output = aligner.next().await.unwrap().unwrap();
@@ -745,7 +766,7 @@ mod tests {
             stream::iter([Ok(input)]),
             vec![true, false, true, true],
             output_schema.clone(),
-            JsonAlignTarget::Rewrite { columns },
+            AlignMode::Rewrite { columns },
         )
         .unwrap();
         let output = aligner.next().await.unwrap().unwrap();
@@ -774,7 +795,7 @@ mod tests {
             vec![false],
             schema([Field::new("j", DataType::Binary, true)
                 .with_extension_type(Json2ExtensionType::default())]),
-            JsonAlignTarget::Rewrite { columns },
+            AlignMode::Rewrite { columns },
         );
         assert!(
             result
@@ -782,6 +803,68 @@ mod tests {
                 .to_string()
                 .contains("does not match output field")
         );
+    }
+
+    #[tokio::test]
+    async fn test_empty_rewrite_only_fills_missing_roots() {
+        let source = int_array([10, 20]);
+        let input = RecordBatch::try_new(
+            schema([Field::new("a", DataType::Int64, true)]),
+            vec![source.clone()],
+        )
+        .unwrap();
+        let output_schema = schema([
+            Field::new("missing", DataType::Utf8, true),
+            Field::new("a", DataType::Int64, true),
+        ]);
+        let mut aligner = JsonSchemaAligner::new(
+            stream::iter([Ok(input)]),
+            vec![false, true],
+            output_schema.clone(),
+            AlignMode::Rewrite {
+                columns: HashMap::new(),
+            },
+        )
+        .unwrap();
+        let output = aligner.next().await.unwrap().unwrap();
+        assert_eq!(output_schema, output.schema());
+        assert_eq!(2, output.num_rows());
+        assert_eq!(2, output.column(0).null_count());
+        assert!(Arc::ptr_eq(&source, output.column(1)));
+    }
+
+    #[tokio::test]
+    async fn test_empty_rewrite_does_not_align_existing_struct() {
+        let source = Arc::new(StructArray::from(vec![(
+            Arc::new(Field::new("x", DataType::Int64, true)),
+            int_array([1, 2]),
+        )])) as ArrayRef;
+        let input = RecordBatch::try_new(
+            schema([Field::new("j", source.data_type().clone(), true)]),
+            vec![source],
+        )
+        .unwrap();
+        let output_schema = schema([Field::new(
+            "j",
+            DataType::Struct(Fields::from(vec![
+                Field::new("x", DataType::Int64, true),
+                Field::new("y", DataType::Utf8, true),
+            ])),
+            true,
+        )]);
+        let mut aligner = JsonSchemaAligner::new(
+            stream::iter([Ok(input)]),
+            vec![true],
+            output_schema,
+            AlignMode::Rewrite {
+                columns: HashMap::new(),
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            aligner.next().await.unwrap(),
+            Err(crate::error::Error::NewRecordBatch { .. })
+        ));
     }
 
     fn schema(fields: impl IntoIterator<Item = Field>) -> SchemaRef {
