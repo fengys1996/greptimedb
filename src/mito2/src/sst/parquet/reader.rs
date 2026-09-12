@@ -85,7 +85,9 @@ use crate::sst::parquet::file_range::{
 };
 use crate::sst::parquet::flat_format::{FlatReadFormat, primary_key_column_index};
 use crate::sst::parquet::format::{INTERNAL_COLUMN_NUM, need_override_sequence};
-use crate::sst::parquet::json_align::{NestedSchemaAligner, ProjectedRecordBatchStream};
+use crate::sst::parquet::json_align::{
+    JsonAlignTarget, JsonSchemaAligner, ProjectedRecordBatchStream,
+};
 use crate::sst::parquet::metadata::MetadataLoader;
 use crate::sst::parquet::prefilter::{
     PrefilterContextBuilder, build_reader_filter_plan, execute_prefilter,
@@ -2070,12 +2072,20 @@ impl RowGroupReaderBuilder {
             return Ok(stream);
         }
 
-        Ok(NestedSchemaAligner::new(
+        let target = if self.json2_rewrite_targets.is_empty() {
+            JsonAlignTarget::AlignToSchema
+        } else {
+            JsonAlignTarget::Rewrite {
+                columns: self.json2_rewrite_targets.clone(),
+            }
+        };
+
+        Ok(JsonSchemaAligner::new(
             stream,
             self.projection.projected_root_presence.clone(),
             self.output_schema.clone(),
+            target,
         )?
-        .with_json2_rewrite_targets(&self.json2_rewrite_targets)?
         .boxed())
     }
 
