@@ -573,6 +573,10 @@ impl IndexerBuilderImpl {
             &self.metadata,
             self.fulltext_index_config.compress,
             mem_limit,
+            matches!(
+                self.build_type,
+                IndexBuildType::Flush | IndexBuildType::Compact
+            ),
         )
         .await;
 

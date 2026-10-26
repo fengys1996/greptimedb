@@ -915,6 +915,7 @@ impl ParquetReaderBuilder {
 
         let fulltext_filtered = self
             .prune_row_groups_by_fulltext_index(
+                read_format.metadata(),
                 row_group_size,
                 num_row_groups,
                 &mut output,
@@ -954,6 +955,7 @@ impl ParquetReaderBuilder {
 
         if !fulltext_filtered {
             self.prune_row_groups_by_fulltext_bloom(
+                read_format.metadata(),
                 row_group_size,
                 parquet_meta,
                 &mut output,
@@ -968,6 +970,7 @@ impl ParquetReaderBuilder {
     /// Prunes row groups by fulltext index. Returns `true` if the row groups are pruned.
     async fn prune_row_groups_by_fulltext_index(
         &self,
+        sst_metadata: &RegionMetadataRef,
         row_group_size: usize,
         num_row_groups: usize,
         output: &mut RowGroupSelection,
@@ -986,6 +989,9 @@ impl ParquetReaderBuilder {
             &self.fulltext_index_appliers[..]
         };
         for index_applier in appliers.iter().flatten() {
+            if !index_applier.compatible_with_sst(sst_metadata) {
+                continue;
+            }
             let predicate_key = index_applier.predicate_key();
             // Fast path: return early if the result is in the cache.
             let cached = self
@@ -1229,6 +1235,7 @@ impl ParquetReaderBuilder {
 
     async fn prune_row_groups_by_fulltext_bloom(
         &self,
+        sst_metadata: &RegionMetadataRef,
         row_group_size: usize,
         parquet_meta: &ParquetMetaData,
         output: &mut RowGroupSelection,
@@ -1247,6 +1254,9 @@ impl ParquetReaderBuilder {
             &self.fulltext_index_appliers[..]
         };
         for index_applier in appliers.iter().flatten() {
+            if !index_applier.compatible_with_sst(sst_metadata) {
+                continue;
+            }
             let predicate_key = index_applier.predicate_key();
             // Fast path: return early if the result is in the cache.
             let cached = self
