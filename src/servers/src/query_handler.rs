@@ -107,6 +107,8 @@ pub struct PromStoreResponse {
     pub content_encoding: HeaderValue,
     pub resp_metrics: HashMap<String, Value>,
     pub body: Vec<u8>,
+    /// Incremental response body for chunked Remote Read.
+    pub stream: Option<futures::stream::BoxStream<'static, Result<bytes::Bytes>>>,
 }
 
 #[async_trait]

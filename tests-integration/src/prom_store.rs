@@ -795,6 +795,7 @@ mod tests {
     }
 
     async fn check_native_histogram_remote_read(instance: &Arc<Instance>) {
+        common_telemetry::init_default_ut_logging();
         use api::greptime_proto::io::prometheus::write::v2::{
             Histogram,
             histogram::{Count, ZeroCount},
@@ -881,7 +882,8 @@ mod tests {
                     .remove(0)
                     .unwrap();
             }
-            for accepted_response_types in [vec![], vec![0], vec![1, 0]] {
+            for accepted_response_types in [vec![], vec![0], vec![1, 0], vec![1]] {
+                let streaming = accepted_response_types.first() == Some(&1);
                 let mut query = remote_query("latency");
                 query.end_timestamp_ms = 4000;
                 query.matchers.push(LabelMatcher {
@@ -907,6 +909,39 @@ mod tests {
                     .send()
                     .await;
                 assert_eq!(response.status(), 200, "{}", response.text().await);
+                if streaming {
+                    assert!(
+                        response.headers()["content-type"]
+                            .to_str()
+                            .unwrap()
+                            .starts_with("application/x-streamed-protobuf")
+                    );
+                    assert!(response.headers().get("content-encoding").is_none());
+                    let body = response.bytes().await;
+                    let mut remaining = body.as_ref();
+                    let mut seen = std::collections::BTreeSet::new();
+                    while !remaining.is_empty() {
+                        let length =
+                            prost::encoding::decode_varint(&mut remaining).unwrap() as usize;
+                        assert!(remaining.len() >= 4 + length);
+                        let frame = api::prom_store::remote::ChunkedReadResponse::decode(
+                            &remaining[4..4 + length],
+                        )
+                        .unwrap();
+                        seen.insert(frame.query_index);
+                        for series in frame.chunked_series {
+                            assert!(series.labels.windows(2).all(|p| p[0].name < p[1].name));
+                            assert!(!series.chunks.is_empty());
+                            for chunk in series.chunks {
+                                assert!((1..=3).contains(&chunk.r#type));
+                                assert!(!chunk.data.is_empty());
+                            }
+                        }
+                        remaining = &remaining[4 + length..];
+                    }
+                    assert_eq!(seen.into_iter().collect::<Vec<_>>(), [0, 1]);
+                    continue;
+                }
                 assert_eq!(response.headers()["content-type"], "application/x-protobuf");
                 assert_eq!(response.headers()["content-encoding"], "snappy");
                 let body = prom_store::snappy_decompress(&response.bytes().await).unwrap();
@@ -955,7 +990,7 @@ mod tests {
                 prom_store::snappy_compress(
                     &ReadRequest {
                         queries: vec![remote_query("latency")],
-                        accepted_response_types: vec![1],
+                        accepted_response_types: vec![99],
                     }
                     .encode_to_vec(),
                 )

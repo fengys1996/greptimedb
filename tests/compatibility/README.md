@@ -240,3 +240,23 @@ For PR1, all cases are expected to pass. Future PRs will add `xfail` support wit
 ## Cross-Job Distributed State
 
 PR1 runs setup and verify in the **same job** (same process). Cross-job artifact restore for distributed state is not supported in PR1 due to port randomization and etcd lease expiration.
+
+## Prometheus Remote Read wire compatibility
+
+`wire/prom_remote_read/` is a standalone Go oracle pinned to Prometheus v0.51.0. It
+emits the upstream XOR and integer/float histogram chunk fixtures used by the
+Rust encoder tests. With an endpoint and an existing metric table, it validates
+stream frame lengths, CRC32C, series ordering, timestamps, and chunk decoding:
+
+```shell
+cd tests/compatibility/wire/prom_remote_read
+go run -mod=readonly .
+go run -mod=readonly . --url http://127.0.0.1:4000/v1/prometheus/read --metric my_metric --end 2000000000000
+```
+
+This is an HTTP wire-format check, separate from the SQL restart runner above.
+The pinned decoder covers exponential native histograms; custom-bucket layouts
+require a newer Prometheus decoder and are not covered by these fixtures.
+For CPU/RSS measurement, use `tests-integration/benches/remote_read.py` with an
+isolated Linux server; `remote_read_results.json` records exploratory debug-build
+results and reproduction parameters.

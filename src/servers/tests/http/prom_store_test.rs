@@ -156,6 +156,7 @@ impl PromStoreProtocolHandler for DummyInstance {
         };
 
         Ok(PromStoreResponse {
+            stream: None,
             content_type: CONTENT_TYPE_PROTOBUF.clone(),
             content_encoding: CONTENT_ENCODING_SNAPPY.clone(),
             resp_metrics: Default::default(),

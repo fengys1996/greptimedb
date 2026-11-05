@@ -14,6 +14,8 @@
 
 //! prometheus protocol supportings
 //! handles prometheus remote_write, remote_read logic
+pub mod streamed;
+
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;

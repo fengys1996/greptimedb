@@ -1,0 +1,270 @@
+{
+  "base_commit": "2447ea24c2",
+  "build": "debug (rtk cargo build --bin greptime -p cmd)",
+  "platform": "Linux-7.2.14-arch1-1-x86_64-with-glibc2.44",
+  "notes": [
+    "Exploratory results, not production/release performance.",
+    "Final reviewed code; compilation and regression tests completed before this run.",
+    "Three trials per case, a fresh standalone process for each trial, alternating format order. OS file cache was not cleared.",
+    "Process CPU is user+system time; RSS sampled every 10 ms. Process startup occurs before the measurement.",
+    "Only scalar data measured. Histograms currently use one sample per chunk.",
+    "Response encoding buffers are bounded by batches/slices and the 1 MiB frame limit; total query memory includes sorting."
+  ],
+  "config": "enable_telemetry = false\n[http]\naddr = \"127.0.0.1:14000\"\ntimeout = \"600s\"\n[grpc]\nbind_addr = \"127.0.0.1:14001\"\n[mysql]\nenable = false\n[postgres]\nenable = false\n[runtime]\nglobal_rt_size = 4\ncompact_rt_size = 2\n[query]\nparallelism = 4\nmemory_pool_size = \"256MB\"\n[storage]\ndata_home = \"/tmp/greptime-chunk-benchmark/data\"\n[wal]\nprovider = \"raft_engine\"\ndir = \"/tmp/greptime-chunk-benchmark/wal\"\n[logging]\nlevel = \"warn\"\ndir = \"/tmp/greptime-chunk-benchmark/logs\"\n",
+  "setup": {
+    "cases": [
+      {
+        "series": 10,
+        "rows": 1000000
+      },
+      {
+        "series": 10000,
+        "rows": 1000000
+      },
+      {
+        "series": 10,
+        "rows": 3000000
+      }
+    ],
+    "create_sql": "CREATE TABLE rr_bench_{series}_{rows} (host STRING, job STRING, greptime_timestamp TIMESTAMP(3), greptime_value DOUBLE, TIME INDEX(greptime_timestamp), PRIMARY KEY(host,job))",
+    "insert_sql": "INSERT INTO rr_bench_{series}_{rows} SELECT CAST((number+{start}) % {series} AS STRING), 'east', CAST(CAST(((number+{start}) / {series}) AS BIGINT) * 1000 AS TIMESTAMP), CAST((number+{start}) % 1000 AS DOUBLE)*0.001 FROM numbers LIMIT 250000",
+    "insert_loop": "start in range(0, rows, 250000), on a new empty table; ADMIN FLUSH_TABLE after inserts",
+    "measure": "Restart the server for every trial, wait for /health then 1 second; python3 tests-integration/benches/remote_read.py --pid PID --table TABLE --end-ms 1000000000 --mode samples|streamed --repeats 1"
+  },
+  "trials": [
+    {
+      "mode": "samples",
+      "table": "rr_bench_10_1000000",
+      "cpu_seconds": 1.03,
+      "elapsed_seconds": 0.9057713589991181,
+      "first_byte_seconds": 0.9048023149989604,
+      "wire_bytes": 8575425,
+      "baseline_rss_bytes": 610557952,
+      "peak_rss_bytes": 720957440,
+      "rss_increase_bytes": 110399488,
+      "repeat": 0,
+      "fresh_process": true
+    },
+    {
+      "mode": "streamed",
+      "table": "rr_bench_10_1000000",
+      "cpu_seconds": 2.11,
+      "elapsed_seconds": 0.8690802789988084,
+      "first_byte_seconds": 0.3374495369989745,
+      "wire_bytes": 8070081,
+      "baseline_rss_bytes": 609603584,
+      "peak_rss_bytes": 721928192,
+      "rss_increase_bytes": 112324608,
+      "repeat": 0,
+      "fresh_process": true
+    },
+    {
+      "mode": "samples",
+      "table": "rr_bench_10000_1000000",
+      "cpu_seconds": 0.8200000000000001,
+      "elapsed_seconds": 0.6976565739987564,
+      "first_byte_seconds": 0.697144402000049,
+      "wire_bytes": 4170373,
+      "baseline_rss_bytes": 608616448,
+      "peak_rss_bytes": 701149184,
+      "rss_increase_bytes": 92532736,
+      "repeat": 0,
+      "fresh_process": true
+    },
+    {
+      "mode": "streamed",
+      "table": "rr_bench_10000_1000000",
+      "cpu_seconds": 2.28,
+      "elapsed_seconds": 0.9089190590002545,
+      "first_byte_seconds": 0.34051459900001646,
+      "wire_bytes": 1974372,
+      "baseline_rss_bytes": 617496576,
+      "peak_rss_bytes": 724303872,
+      "rss_increase_bytes": 106807296,
+      "repeat": 0,
+      "fresh_process": true
+    },
+    {
+      "mode": "samples",
+      "table": "rr_bench_10_3000000",
+      "cpu_seconds": 3.2199999999999998,
+      "elapsed_seconds": 2.863887670000622,
+      "first_byte_seconds": 2.862193863000357,
+      "wire_bytes": 25723656,
+      "baseline_rss_bytes": 600936448,
+      "peak_rss_bytes": 868884480,
+      "rss_increase_bytes": 267948032,
+      "repeat": 0,
+      "fresh_process": true
+    },
+    {
+      "mode": "streamed",
+      "table": "rr_bench_10_3000000",
+      "cpu_seconds": 6.48,
+      "elapsed_seconds": 2.5776389660004497,
+      "first_byte_seconds": 0.8918778740007838,
+      "wire_bytes": 24227921,
+      "baseline_rss_bytes": 598863872,
+      "peak_rss_bytes": 882524160,
+      "rss_increase_bytes": 283660288,
+      "repeat": 0,
+      "fresh_process": true
+    },
+    {
+      "mode": "streamed",
+      "table": "rr_bench_10_1000000",
+      "cpu_seconds": 2.09,
+      "elapsed_seconds": 0.8244385270008934,
+      "first_byte_seconds": 0.3110595790003572,
+      "wire_bytes": 8070081,
+      "baseline_rss_bytes": 605720576,
+      "peak_rss_bytes": 715128832,
+      "rss_increase_bytes": 109408256,
+      "repeat": 1,
+      "fresh_process": true
+    },
+    {
+      "mode": "samples",
+      "table": "rr_bench_10_1000000",
+      "cpu_seconds": 0.99,
+      "elapsed_seconds": 0.8687168159995053,
+      "first_byte_seconds": 0.8677192220002325,
+      "wire_bytes": 8575425,
+      "baseline_rss_bytes": 604864512,
+      "peak_rss_bytes": 714813440,
+      "rss_increase_bytes": 109948928,
+      "repeat": 1,
+      "fresh_process": true
+    },
+    {
+      "mode": "streamed",
+      "table": "rr_bench_10000_1000000",
+      "cpu_seconds": 2.29,
+      "elapsed_seconds": 0.976731792999999,
+      "first_byte_seconds": 0.31885555000008026,
+      "wire_bytes": 1974372,
+      "baseline_rss_bytes": 610562048,
+      "peak_rss_bytes": 724926464,
+      "rss_increase_bytes": 114364416,
+      "repeat": 1,
+      "fresh_process": true
+    },
+    {
+      "mode": "samples",
+      "table": "rr_bench_10000_1000000",
+      "cpu_seconds": 0.81,
+      "elapsed_seconds": 0.6957956090009247,
+      "first_byte_seconds": 0.6952943170017534,
+      "wire_bytes": 4170373,
+      "baseline_rss_bytes": 609087488,
+      "peak_rss_bytes": 701034496,
+      "rss_increase_bytes": 91947008,
+      "repeat": 1,
+      "fresh_process": true
+    },
+    {
+      "mode": "streamed",
+      "table": "rr_bench_10_3000000",
+      "cpu_seconds": 6.46,
+      "elapsed_seconds": 2.7401057229999424,
+      "first_byte_seconds": 0.9135687409998354,
+      "wire_bytes": 24227921,
+      "baseline_rss_bytes": 606355456,
+      "peak_rss_bytes": 882298880,
+      "rss_increase_bytes": 275943424,
+      "repeat": 1,
+      "fresh_process": true
+    },
+    {
+      "mode": "samples",
+      "table": "rr_bench_10_3000000",
+      "cpu_seconds": 3.2699999999999996,
+      "elapsed_seconds": 2.9002058379992377,
+      "first_byte_seconds": 2.897731057999408,
+      "wire_bytes": 25723656,
+      "baseline_rss_bytes": 598650880,
+      "peak_rss_bytes": 877633536,
+      "rss_increase_bytes": 278982656,
+      "repeat": 1,
+      "fresh_process": true
+    },
+    {
+      "mode": "samples",
+      "table": "rr_bench_10_1000000",
+      "cpu_seconds": 0.99,
+      "elapsed_seconds": 0.8644515890009643,
+      "first_byte_seconds": 0.863767505999931,
+      "wire_bytes": 8575425,
+      "baseline_rss_bytes": 601329664,
+      "peak_rss_bytes": 713842688,
+      "rss_increase_bytes": 112513024,
+      "repeat": 2,
+      "fresh_process": true
+    },
+    {
+      "mode": "streamed",
+      "table": "rr_bench_10_1000000",
+      "cpu_seconds": 2.09,
+      "elapsed_seconds": 0.8408481240003312,
+      "first_byte_seconds": 0.3226489970002149,
+      "wire_bytes": 8070081,
+      "baseline_rss_bytes": 613875712,
+      "peak_rss_bytes": 725110784,
+      "rss_increase_bytes": 111235072,
+      "repeat": 2,
+      "fresh_process": true
+    },
+    {
+      "mode": "samples",
+      "table": "rr_bench_10000_1000000",
+      "cpu_seconds": 0.8,
+      "elapsed_seconds": 0.6868350120003015,
+      "first_byte_seconds": 0.6862695689997054,
+      "wire_bytes": 4170373,
+      "baseline_rss_bytes": 609222656,
+      "peak_rss_bytes": 701685760,
+      "rss_increase_bytes": 92463104,
+      "repeat": 2,
+      "fresh_process": true
+    },
+    {
+      "mode": "streamed",
+      "table": "rr_bench_10000_1000000",
+      "cpu_seconds": 2.31,
+      "elapsed_seconds": 0.9627856979986973,
+      "first_byte_seconds": 0.3339918139990914,
+      "wire_bytes": 1974372,
+      "baseline_rss_bytes": 605552640,
+      "peak_rss_bytes": 717828096,
+      "rss_increase_bytes": 112275456,
+      "repeat": 2,
+      "fresh_process": true
+    },
+    {
+      "mode": "samples",
+      "table": "rr_bench_10_3000000",
+      "cpu_seconds": 3.21,
+      "elapsed_seconds": 2.832827119000285,
+      "first_byte_seconds": 2.831227692999164,
+      "wire_bytes": 25723656,
+      "baseline_rss_bytes": 612028416,
+      "peak_rss_bytes": 867938304,
+      "rss_increase_bytes": 255909888,
+      "repeat": 2,
+      "fresh_process": true
+    },
+    {
+      "mode": "streamed",
+      "table": "rr_bench_10_3000000",
+      "cpu_seconds": 6.46,
+      "elapsed_seconds": 2.686565256999529,
+      "first_byte_seconds": 0.9000078170010966,
+      "wire_bytes": 24227921,
+      "baseline_rss_bytes": 608165888,
+      "peak_rss_bytes": 884129792,
+      "rss_increase_bytes": 275963904,
+      "repeat": 2,
+      "fresh_process": true
+    }
+  ]
+}

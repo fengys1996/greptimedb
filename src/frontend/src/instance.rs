@@ -3094,6 +3094,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_prom_remote_read_streamed_with_custom_columns() -> TestResult<()> {
+        let schema = Arc::new(GtSchema::new(vec![
+            ColumnSchema::new(
+                "custom_ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+            ColumnSchema::new("custom_value", ConcreteDataType::float64_datatype(), false),
+        ]));
+        let recordbatch = RecordBatch::new(
+            schema,
+            vec![
+                Arc::new(TimestampMillisecondVector::from_vec(vec![1000, 2000, 3000])) as VectorRef,
+                Arc::new(Float64Vector::from_vec(vec![1.0, 2.0, 3.0])) as VectorRef,
+            ],
+        )
+        .unwrap();
+        let instance = test_instance_with_tables(
+            MemTable::table("custom_metric", recordbatch),
+            test_table(1025, "target")?,
+        )
+        .await?;
+
+        let response = PromStoreProtocolHandler::read(
+            &instance,
+            ReadRequest {
+                accepted_response_types: vec![1, 0],
+                queries: vec![RemoteQuery {
+                    start_timestamp_ms: 1500,
+                    end_timestamp_ms: 2500,
+                    matchers: vec![LabelMatcher {
+                        r#type: PromMatcherType::Eq as i32,
+                        name: servers::prom_store::METRIC_NAME_LABEL.to_string(),
+                        value: "custom_metric".to_string(),
+                    }],
+                    ..Default::default()
+                }],
+            },
+            test_query_ctx(1),
+        )
+        .await
+        .unwrap();
+        use futures::TryStreamExt;
+        assert!(response.body.is_empty());
+        assert!(response.content_encoding.is_empty());
+        let frames = response
+            .stream
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        assert_eq!(frames.len(), 1);
+        let mut frame = frames[0].as_ref();
+        let size = prost::encoding::decode_varint(&mut frame).unwrap() as usize;
+        assert_eq!(frame.len(), size + 4);
+        let response = api::prom_store::remote::ChunkedReadResponse::decode(&frame[4..]).unwrap();
+        assert_eq!(response.query_index, 0);
+        let series = &response.chunked_series[0];
+        assert_eq!(series.labels[0].value, "custom_metric");
+        assert_eq!(series.chunks.len(), 1);
+        assert_eq!(series.chunks[0].min_time_ms, 2000);
+        assert_eq!(series.chunks[0].max_time_ms, 2000);
+        assert_eq!(series.chunks[0].r#type, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_prom_remote_read_with_custom_timestamp_and_value_columns() -> TestResult<()> {
         let schema = Arc::new(GtSchema::new(vec![
             ColumnSchema::new(

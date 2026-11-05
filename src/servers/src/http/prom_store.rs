@@ -909,7 +909,9 @@ impl IntoResponse for PromStoreResponse {
     fn into_response(self) -> axum::response::Response {
         let mut header_map = HeaderMap::new();
         header_map.insert(&header::CONTENT_TYPE, self.content_type);
-        header_map.insert(&header::CONTENT_ENCODING, self.content_encoding);
+        if !self.content_encoding.is_empty() {
+            header_map.insert(&header::CONTENT_ENCODING, self.content_encoding);
+        }
 
         let metrics = if self.resp_metrics.is_empty() {
             None
@@ -920,7 +922,11 @@ impl IntoResponse for PromStoreResponse {
             header_map.insert(&GREPTIME_DB_HEADER_METRICS, m);
         }
 
-        (header_map, self.body).into_response()
+        let body = match self.stream {
+            Some(stream) => axum::body::Body::from_stream(stream),
+            None => axum::body::Body::from(self.body),
+        };
+        (header_map, body).into_response()
     }
 }
 
@@ -941,11 +947,26 @@ pub async fn remote_read(
     let request = decode_remote_read_request(body, &state.memory_limiter).await?;
 
     let query_ctx = Arc::new(query_ctx);
-    let _timer = crate::metrics::METRIC_HTTP_PROM_STORE_READ_ELAPSED
+    let timer = crate::metrics::METRIC_HTTP_PROM_STORE_READ_ELAPSED
         .with_label_values(&[db.as_str()])
         .start_timer();
 
-    state.prom_store_handler.read(request, query_ctx).await
+    let mut response = state.prom_store_handler.read(request, query_ctx).await?;
+    if let Some(stream) = response.stream.take() {
+        use futures::StreamExt;
+        response.stream = Some(
+            stream
+                .map(move |frame| {
+                    let _ = &timer;
+                    if let Err(error) = &frame {
+                        common_telemetry::warn!("Prometheus Remote Read stream failed: {error:?}");
+                    }
+                    frame
+                })
+                .boxed(),
+        );
+    }
+    Ok(response)
 }
 
 async fn decode_remote_read_request(

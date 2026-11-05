@@ -37,6 +37,7 @@ use common_recordbatch::RecordBatches;
 use common_telemetry::{debug, tracing};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::Schema;
+use futures::StreamExt;
 use operator::insert::{
     AutoCreateTableType, InserterRef, PerTableSemanticIndex, apply_per_table_semantic_options,
     build_create_table_expr, fill_table_options_for_create, parse_per_table_semantic_index,
@@ -66,8 +67,6 @@ use crate::error::{
     InvalidPromRemoteReadSchemaSnafu, PromStoreRemoteQueryPlanSnafu, ReadTableSnafu, Result,
 };
 use crate::instance::Instance;
-
-const SAMPLES_RESPONSE_TYPE: i32 = ResponseType::Samples as i32;
 
 struct RemoteQueryOutput {
     table_name: String,
@@ -104,12 +103,6 @@ fn fill_metric_physical_table_options(table_options: &mut HashMap<String, String
     table_options.insert(PHYSICAL_TABLE_METADATA_KEY.to_string(), "true".to_string());
 }
 
-#[inline]
-fn is_supported(response_type: i32) -> bool {
-    // Only supports samples response right now
-    response_type == SAMPLES_RESPONSE_TYPE
-}
-
 /// Negotiating the content type of the remote read response.
 ///
 /// Response types are taken from the list in the FIFO order. If no response type in `accepted_response_types` is
@@ -120,17 +113,13 @@ fn negotiate_response_type(accepted_response_types: &[i32]) -> ServerResult<Resp
         return Ok(ResponseType::Samples);
     }
 
-    let response_type = accepted_response_types
+    accepted_response_types
         .iter()
-        .find(|t| is_supported(**t))
+        .filter_map(|response_type| ResponseType::try_from(*response_type).ok())
+        .find(|response_type| matches!(response_type, ResponseType::Samples | ResponseType::StreamedXorChunks))
         .with_context(|| error::NotSupportedSnafu {
-            feat: format!(
-                "server does not support any of the requested response types: {accepted_response_types:?}",
-            ),
-        })?;
-
-    // It's safe to unwrap here, we known that it should be SAMPLES_RESPONSE_TYPE
-    Ok(ResponseType::try_from(*response_type).unwrap())
+            feat: format!("server does not support any of the requested response types: {accepted_response_types:?}"),
+        })
 }
 
 fn resolve_remote_query_target(
@@ -232,6 +221,7 @@ impl Instance {
         schema_name: &str,
         table_name: &str,
         query: &Query,
+        streaming: bool,
     ) -> Result<Option<RemoteQueryOutput>> {
         let Some(table) = self
             .catalog_manager
@@ -268,6 +258,17 @@ impl Instance {
                 table_name: format_full_table_name(catalog_name, schema_name, table_name),
             })?;
 
+        let dataframe = if streaming {
+            prom_store::streamed::sort_dataframe(
+                dataframe,
+                table_name,
+                &timestamp_column_name,
+                &value_column_name,
+            )
+            .context(PromStoreRemoteQueryPlanSnafu)?
+        } else {
+            dataframe
+        };
         let logical_plan = prom_store::query_to_plan(dataframe, query, &timestamp_column_name)
             .context(PromStoreRemoteQueryPlanSnafu)?;
 
@@ -297,12 +298,20 @@ impl Instance {
         ctx: QueryContextRef,
         queries: &[Query],
         query_targets: &[PermissionTableTarget],
+        streaming: bool,
     ) -> ServerResult<Vec<Option<RemoteQueryOutput>>> {
         let mut results = Vec::with_capacity(queries.len());
 
         for (query, target) in queries.iter().zip(query_targets) {
             let result = self
-                .handle_remote_query(&ctx, &target.catalog, &target.schema, &target.table, query)
+                .handle_remote_query(
+                    &ctx,
+                    &target.catalog,
+                    &target.schema,
+                    &target.table,
+                    query,
+                    streaming,
+                )
                 .await
                 .map_err(BoxedError::new)
                 .context(error::ExecuteQuerySnafu)?;
@@ -706,12 +715,11 @@ impl PromStoreProtocolHandler for Instance {
         }
 
         // TODO(dennis): use read_hints to speedup query if possible
-        let results = self
-            .handle_remote_queries(ctx, &request.queries, &query_targets)
-            .await?;
-
         match response_type {
             ResponseType::Samples => {
+                let results = self
+                    .handle_remote_queries(ctx, &request.queries, &query_targets, false)
+                    .await?;
                 let mut query_results = Vec::with_capacity(results.len());
                 let mut map = HashMap::new();
                 for result in results {
@@ -751,16 +759,50 @@ impl PromStoreProtocolHandler for Instance {
 
                 // TODO(dennis): may consume too much memory, adds flow control
                 Ok(PromStoreResponse {
+                    stream: None,
                     content_type: CONTENT_TYPE_PROTOBUF.clone(),
                     content_encoding: CONTENT_ENCODING_SNAPPY.clone(),
                     resp_metrics,
                     body: prom_store::snappy_compress(&response.encode_to_vec())?,
                 })
             }
-            ResponseType::StreamedXorChunks => error::NotSupportedSnafu {
-                feat: "streamed remote read",
+            ResponseType::StreamedXorChunks => {
+                let instance = self.clone();
+                let stream = async_stream::try_stream! {
+                    // Plan and execute only the current query. Keeping all query
+                    // streams alive can otherwise retain several sort buffers.
+                    for (index, (query, target)) in request.queries.iter().zip(&query_targets).enumerate() {
+                        let result = instance
+                            .handle_remote_query(&ctx, &target.catalog, &target.schema, &target.table, query, true)
+                            .await
+                            .map_err(BoxedError::new)
+                            .context(error::ExecuteQuerySnafu)?;
+                        let Some(result) = result else { continue };
+                        let input = match result.output.data {
+                            OutputData::Stream(input) => Ok(input),
+                            _ => error::InvalidPromRemoteReadQueryResultSnafu {
+                                msg: "expected a streaming query result",
+                            }.fail(),
+                        }?;
+                        let mut frames = prom_store::streamed::encode_stream(
+                            input, result.table_name, result.timestamp_column_name,
+                            result.value_column_name, index as i64,
+                        );
+                        while let Some(frame) = frames.next().await {
+                            yield frame?;
+                        }
+                    }
+                };
+                Ok(PromStoreResponse {
+                    content_type: axum::http::HeaderValue::from_static(
+                        "application/x-streamed-protobuf; proto=prometheus.ChunkedReadResponse",
+                    ),
+                    content_encoding: axum::http::HeaderValue::from_static(""),
+                    resp_metrics: HashMap::new(),
+                    body: Vec::new(),
+                    stream: Some(stream.boxed()),
+                })
             }
-            .fail(),
         }
     }
 }
@@ -921,20 +963,18 @@ mod tests {
 
     #[test]
     fn test_native_histogram_remote_read_response_negotiation() {
-        for accepted in [
-            vec![],
-            vec![ResponseType::Samples as i32],
-            vec![
-                ResponseType::StreamedXorChunks as i32,
-                ResponseType::Samples as i32,
-            ],
+        for (accepted, expected) in [
+            (vec![], ResponseType::Samples),
+            (vec![0], ResponseType::Samples),
+            (vec![1], ResponseType::StreamedXorChunks),
+            (vec![1, 0], ResponseType::StreamedXorChunks),
+            (vec![0, 1], ResponseType::Samples),
+            (vec![99, 1, 0], ResponseType::StreamedXorChunks),
+            (vec![99, 0], ResponseType::Samples),
         ] {
-            assert_eq!(
-                negotiate_response_type(&accepted).unwrap(),
-                ResponseType::Samples
-            );
+            assert_eq!(negotiate_response_type(&accepted).unwrap(), expected);
         }
-        assert!(negotiate_response_type(&[ResponseType::StreamedXorChunks as i32]).is_err());
+        assert!(negotiate_response_type(&[99, 100]).is_err());
     }
 
     #[test]
