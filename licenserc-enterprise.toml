@@ -25,6 +25,7 @@ includes = [
     "src/sql/src/parsers/alter_parser/trigger.rs",
     "src/sql/src/parsers/create_parser/trigger.rs",
     "src/sql/src/parsers/show_parser/trigger.rs",
+    "src/metric-engine/src/write_hook.rs",
     "src/mito2/src/extension.rs",
     "src/mito2/src/engine/table_compaction.rs",
     "src/mito2/src/engine/table_compaction/output.rs",

@@ -43,11 +43,26 @@ use crate::utils;
 /// itself.
 pub struct DataRegion {
     mito: MitoEngine,
+    #[cfg(feature = "enterprise")]
+    write_hook: Option<crate::write_hook::MetricWriteHookRef>,
 }
 
 impl DataRegion {
     pub(crate) fn new(mito: MitoEngine) -> Self {
-        Self { mito }
+        Self {
+            mito,
+            #[cfg(feature = "enterprise")]
+            write_hook: None,
+        }
+    }
+
+    #[cfg(feature = "enterprise")]
+    pub(crate) fn with_write_hook(
+        mut self,
+        hook: Option<crate::write_hook::MetricWriteHookRef>,
+    ) -> Self {
+        self.write_hook = hook;
+        self
     }
 
     /// Submit an alter request to underlying physical region.
@@ -237,11 +252,30 @@ impl DataRegion {
         request: RegionRequest,
     ) -> Result<AffectedRows> {
         let region_id = utils::to_data_region_id(region_id);
-        self.mito
+        #[cfg(feature = "enterprise")]
+        let mut request = request;
+        #[cfg(feature = "enterprise")]
+        let acknowledged_rows = if let Some(hook) = &self.write_hook
+            && matches!(
+                request,
+                RegionRequest::Put(_) | RegionRequest::BulkInserts(_)
+            ) {
+            hook.pre_write(region_id, &mut request, &self.mito)
+                .await
+                .context(MitoWriteOperationSnafu)?
+        } else {
+            None
+        };
+        let result = self
+            .mito
             .handle_request(region_id, request)
             .await
-            .context(MitoWriteOperationSnafu)
-            .map(|result| result.affected_rows)
+            .context(MitoWriteOperationSnafu)?;
+        #[cfg(feature = "enterprise")]
+        if let Some(rows) = acknowledged_rows {
+            return Ok(rows);
+        }
+        Ok(result.affected_rows)
     }
 
     pub async fn physical_columns(

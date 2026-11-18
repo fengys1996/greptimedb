@@ -114,6 +114,29 @@ impl TestEnv {
         }
     }
 
+    /// Constructs a Metric Engine with the enterprise write extension installed.
+    #[cfg(feature = "enterprise")]
+    pub async fn with_write_hook(hook: crate::write_hook::MetricWriteHookRef) -> Self {
+        let mut mito_env = MitoTestEnv::with_prefix("metric_write_hook").await;
+        let mito = mito_env
+            .create_engine(MitoConfig {
+                default_flat_format: true,
+                ..Default::default()
+            })
+            .await;
+        let metric = MetricEngine::try_new_with_write_hook(
+            mito.clone(),
+            EngineConfig::default(),
+            Some(hook),
+        )
+        .unwrap();
+        Self {
+            mito_env,
+            mito,
+            metric,
+        }
+    }
+
     pub fn data_home(&self) -> String {
         let env_root = self.mito_env.data_home().to_string_lossy().to_string();
         join_dir(&env_root, "data")

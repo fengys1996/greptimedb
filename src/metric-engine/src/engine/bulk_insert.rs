@@ -875,4 +875,128 @@ mod tests {
 
         assert_eq!(put_output, bulk_output);
     }
+
+    #[cfg(feature = "enterprise")]
+    #[tokio::test]
+    async fn test_metric_write_hook() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        use common_error::ext::BoxedError;
+        use store_api::region_request::AffectedRows;
+
+        use crate::write_hook::MetricWriteHook;
+
+        #[derive(Default)]
+        struct Hook {
+            calls: AtomicUsize,
+            reject: AtomicBool,
+            invalidate: AtomicBool,
+        }
+
+        #[async_trait::async_trait]
+        impl MetricWriteHook for Hook {
+            async fn pre_write(
+                &self,
+                region_id: RegionId,
+                request: &mut RegionRequest,
+                mito: &dyn RegionEngine,
+            ) -> Result<Option<AffectedRows>, BoxedError> {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                assert!(mito.get_metadata(region_id).await.is_ok());
+                if self.reject.load(Ordering::Relaxed) {
+                    return Err(BoxedError::new(
+                        crate::error::UnexpectedRequestSnafu {
+                            reason: "test hook rejection",
+                        }
+                        .build(),
+                    ));
+                }
+                match request {
+                    RegionRequest::Put(put) => {
+                        assert!(
+                            put.rows
+                                .schema
+                                .iter()
+                                .any(|c| c.column_name == "__primary_key")
+                        );
+                        // A test policy accepts one row but acknowledges the whole request.
+                        let rows = put.rows.rows.len() as AffectedRows;
+                        put.rows.rows.truncate(1);
+                        if self.invalidate.load(Ordering::Relaxed) {
+                            put.rows.rows[0].values.clear();
+                        }
+                        Ok(Some(rows))
+                    }
+                    RegionRequest::BulkInserts(bulk) => {
+                        assert!(bulk.payload.column_by_name("__primary_key").is_some());
+                        // No override: propagate Mito's affected-row count.
+                        Ok(None)
+                    }
+                    _ => panic!("non-write request reached hook"),
+                }
+            }
+        }
+
+        let hook = Arc::new(Hook::default());
+        let env = TestEnv::with_write_hook(hook.clone()).await;
+        env.init_metric_region().await;
+        assert_eq!(hook.calls.load(Ordering::Relaxed), 0);
+        let engine = env.metric();
+        let logical = env.default_logical_region_id();
+        let put = || {
+            RegionRequest::Put(RegionPutRequest {
+                rows: api::v1::Rows {
+                    schema: test_util::row_schema_with_tags(&["job"]),
+                    rows: test_util::build_rows(1, 3),
+                },
+                hint: None,
+                skip_wal: false,
+                partition_expr_version: None,
+            })
+        };
+        let response = engine.handle_request(logical, put()).await.unwrap();
+        assert_eq!(response.affected_rows, 3);
+        let response = engine
+            .handle_request(
+                logical,
+                build_bulk_request(logical, build_logical_batch(10, 2), false),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.affected_rows, 2);
+        assert_eq!(hook.calls.load(Ordering::Relaxed), 2);
+        hook.reject.store(true, Ordering::Relaxed);
+        assert!(engine.handle_request(logical, put()).await.is_err());
+        assert!(
+            engine
+                .handle_request(
+                    logical,
+                    build_bulk_request(logical, build_logical_batch(20, 2), false),
+                )
+                .await
+                .is_err()
+        );
+        // An acknowledgment override must not hide an error from Mito.
+        hook.reject.store(false, Ordering::Relaxed);
+        hook.invalidate.store(true, Ordering::Relaxed);
+        assert!(engine.handle_request(logical, put()).await.is_err());
+        let batches = RecordBatches::try_collect(
+            engine
+                .scan_to_stream(logical, ScanRequest::default())
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 3);
+        let calls = hook.calls.load(Ordering::Relaxed);
+        engine
+            .handle_request(
+                env.default_physical_region_id(),
+                RegionRequest::Flush(RegionFlushRequest::default()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(hook.calls.load(Ordering::Relaxed), calls);
+    }
 }

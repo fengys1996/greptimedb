@@ -748,8 +748,16 @@ impl DatanodeBuilder {
             )
             .await?;
 
+        #[cfg(not(feature = "enterprise"))]
         let metric_engine = MetricEngine::try_new(mito_engine.clone(), metric_engine_config)
             .context(BuildMetricEngineSnafu)?;
+        #[cfg(feature = "enterprise")]
+        let metric_engine = MetricEngine::try_new_with_write_hook(
+            mito_engine.clone(),
+            metric_engine_config,
+            plugins.get::<metric_engine::write_hook::MetricWriteHookRef>(),
+        )
+        .context(BuildMetricEngineSnafu)?;
 
         let file_engine = FileRegionEngine::new(
             file_engine_config,

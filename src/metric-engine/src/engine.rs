@@ -528,9 +528,28 @@ pub struct PutGroupResult {
 }
 
 impl MetricEngine {
-    pub fn try_new(mito: MitoEngine, mut config: EngineConfig) -> Result<Self> {
-        let metadata_region = MetadataRegion::new(mito.clone());
+    pub fn try_new(mito: MitoEngine, config: EngineConfig) -> Result<Self> {
         let data_region = DataRegion::new(mito.clone());
+        Self::try_new_inner(mito, config, data_region)
+    }
+
+    /// Creates an engine with an optional node-wide write hook.
+    #[cfg(feature = "enterprise")]
+    pub fn try_new_with_write_hook(
+        mito: MitoEngine,
+        config: EngineConfig,
+        hook: Option<crate::write_hook::MetricWriteHookRef>,
+    ) -> Result<Self> {
+        let data_region = DataRegion::new(mito.clone()).with_write_hook(hook);
+        Self::try_new_inner(mito, config, data_region)
+    }
+
+    fn try_new_inner(
+        mito: MitoEngine,
+        mut config: EngineConfig,
+        data_region: DataRegion,
+    ) -> Result<Self> {
+        let metadata_region = MetadataRegion::new(mito.clone());
         let state = Arc::new(RwLock::default());
         config.sanitize();
         let flush_interval = config.flush_metadata_region_interval;

@@ -64,3 +64,5 @@ pub mod row_modifier;
 #[cfg(test)]
 mod test_util;
 mod utils;
+#[cfg(feature = "enterprise")]
+pub mod write_hook;

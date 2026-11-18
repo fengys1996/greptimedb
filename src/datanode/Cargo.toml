@@ -6,7 +6,7 @@ license.workspace = true
 
 [features]
 testing = []
-enterprise = ["mito2/enterprise"]
+enterprise = ["metric-engine/enterprise", "mito2/enterprise"]
 
 [lints]
 workspace = true

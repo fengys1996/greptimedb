@@ -40,7 +40,10 @@ The architecture is documented at the top of `src/metric-engine/src/lib.rs`.
 physical region, resolves the physical region for the logical id, loads logical
 columns from `metadata_region`, then `row_modifier` rewrites the rows according
 to the data region's primary-key encoding and forwards the request to the Mito2
-data region.
+data region. With `enterprise`, `DataRegion::write_data` invokes an optional
+`MetricWriteHookRef` from `Plugins` for online Put/BulkInserts before Mito WAL.
+The enterprise implementation owns admission and filtering; see `write_hook.rs`
+for the contract. Deletes and replay bypass the hook.
 
 ## Read path
 
